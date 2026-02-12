@@ -1,0 +1,12 @@
+name: gpu-env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11.14
+  - pip
+  - pip:
+      - torch
+      - torchvision
+      - torchaudio
+      - sglang
+
