@@ -1,0 +1,13 @@
+gpu-env/
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+
+
+.DS_Store
+.vscode/
+.idea/
+
