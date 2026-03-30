@@ -1,8 +1,9 @@
 import subprocess
 import os
 
-model = "Qwen/Qwen2.5-0.5B-Instruct"
-PORT = 30001
+MODEL_PATH = os.getenv("MODEL_PATH", "Qwen/Qwen2.5-0.5B-Instruct")
+PORT = int(os.getenv("MODEL_SERVER_PORT", "30001"))
+HOST = os.getenv("MODEL_SERVER_HOST", "0.0.0.0")
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
@@ -10,9 +11,9 @@ def launch():
     print(f"Starting Qwen Server on port {PORT} . . ")
     cmd = [
         "python3", "-m", "sglang.launch_server",
-        "--model-path", model,
+        "--model-path", MODEL_PATH,
         "--port", str(PORT),
-        "--host", "0.0.0.0",
+        "--host", HOST,
         "--tool-call-parser", "qwen25",
         "--attention-backend", "triton",
         "--sampling-backend", "pytorch"

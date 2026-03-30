@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Code Coach",
+  "version": "0.1.0",
+  "description": "Grammarly-style coding suggestions on supported coding websites.",
+  "permissions": ["storage", "activeTab", "sidePanel"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "https://onecompiler.com/*",
+    "https://replit.com/*",
+    "https://leetcode.com/*",
+    "https://www.hackerrank.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "action": {
+    "default_title": "Code Coach"
+  },
+  "side_panel": {
+    "default_path": "sidebar/sidebar.html"
+  },
+  "options_page": "options/options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://onecompiler.com/*",
+        "https://replit.com/*",
+        "https://leetcode.com/*",
+        "https://www.hackerrank.com/*"
+      ],
+      "js": ["content/content-script.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
