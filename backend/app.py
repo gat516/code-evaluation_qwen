@@ -485,7 +485,57 @@ def _apply_line_range_replace(code: str, start_line: int, end_line: int, after: 
     return "\n".join(lines[: start_line - 1] + replacement_lines + lines[end_line:])
 
 
+def _expand_repeated_print_range(code: str, suggestion: AnalyzeSuggestion) -> None:
+    text = (suggestion.message or "").lower()
+    if "repeated" not in text or "print" not in text:
+        return
+
+    lines = code.splitlines()
+    if not lines:
+        return
+
+    base_line = int(getattr(suggestion, "line", 1) or 1)
+    if suggestion.fix and suggestion.fix.range:
+        base_line = int(getattr(suggestion.fix.range, "startLine", base_line) or base_line)
+
+    idx = base_line - 1
+    if idx < 0 or idx >= len(lines):
+        return
+
+    normalize = lambda val: str(val or "").strip()
+    print_re = re.compile(r"^\s*print\((.+)\)\s*;?\s*$")
+
+    pivot_match = print_re.match(normalize(lines[idx]))
+    if not pivot_match:
+        return
+
+    pivot_expr = pivot_match.group(1).strip()
+
+    def same_print_line(line: str) -> bool:
+        m = print_re.match(normalize(line))
+        return bool(m and m.group(1).strip() == pivot_expr)
+
+    start = idx
+    while start - 1 >= 0 and same_print_line(lines[start - 1]):
+        start -= 1
+
+    end = idx
+    while end + 1 < len(lines) and same_print_line(lines[end + 1]):
+        end += 1
+
+    if end - start + 1 < 2:
+        return
+
+    suggestion.line = start + 1
+    suggestion.end_line = end + 1
+    if suggestion.fix and suggestion.fix.range:
+        suggestion.fix.range.startLine = start + 1
+        suggestion.fix.range.endLine = end + 1
+
+
 def _apply_suggestion_patch(code: str, suggestion: AnalyzeSuggestion) -> str:
+    _expand_repeated_print_range(code, suggestion)
+
     fix = suggestion.fix
     if not fix:
         return code
