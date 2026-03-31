@@ -19,12 +19,14 @@ def query_chat_completions(messages: list[dict[str, str]]) -> tuple[str, str]:
     api_key = os.getenv("QWEN_API_KEY", "n/a")
     model = os.getenv("MODEL_ID", "qwen2.5")
     timeout_s = int(os.getenv("REQUEST_TIMEOUT", "30"))
+    max_tokens = int(os.getenv("LLM_MAX_TOKENS", "320"))
 
     endpoint = _join_url(base_url, "/chat/completions")
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": 0.1,
+        "max_tokens": max(64, max_tokens),
     }
 
     encoded = json.dumps(payload).encode("utf-8")

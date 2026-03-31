@@ -69,7 +69,71 @@ def _suggestion_at_line(line_number: int, severity: str, message: str, source: s
     )
 
 
-def _build_suggestions(grading_tool_output: dict, execution: dict) -> list[AnalyzeSuggestion]:
+def _find_repeated_print_block(code: str) -> tuple[int, int, str] | None:
+    lines = code.splitlines()
+    best_start = -1
+    best_end = -1
+
+    i = 0
+    while i < len(lines):
+        match = re.match(r'^\s*print\((.+)\)\s*$', lines[i])
+        if not match:
+            i += 1
+            continue
+
+        expr = match.group(1).strip()
+        start = i
+        j = i + 1
+        while j < len(lines):
+            nxt = re.match(r'^\s*print\((.+)\)\s*$', lines[j])
+            if not nxt or nxt.group(1).strip() != expr:
+                break
+            j += 1
+
+        if (j - start) >= 4 and (j - start) > (best_end - best_start + 1):
+            best_start, best_end = start, j - 1
+
+        i = j
+
+    if best_start == -1:
+        return None
+
+    expr = re.match(r'^\s*print\((.+)\)\s*$', lines[best_start]).group(1).strip()
+    return best_start + 1, best_end + 1, expr
+
+
+def _build_repetition_suggestion(code: str) -> AnalyzeSuggestion | None:
+    block = _find_repeated_print_block(code)
+    if not block:
+        return None
+
+    start_line, end_line, expr = block
+    count = end_line - start_line + 1
+    replacement = f"for _ in range({count}):\n    print({expr})"
+    return AnalyzeSuggestion(
+        line=start_line,
+        col=0,
+        end_line=end_line,
+        end_col=1,
+        severity="info",
+        message=(
+            f"Repeated print statement appears {count} times. "
+            "Consider a loop for maintainability."
+        ),
+        fix=SuggestionFix(
+            replacement=replacement,
+            range=SuggestionRange(
+                startLine=start_line,
+                startCol=0,
+                endLine=end_line,
+                endCol=1,
+            ),
+        ),
+        source="ai",
+    )
+
+
+def _build_suggestions(grading_tool_output: dict, execution: dict, code: str) -> list[AnalyzeSuggestion]:
     suggestions: list[AnalyzeSuggestion] = []
     grade = grading_tool_output.get("grade")
     explanation = grading_tool_output.get("explanation", "No explanation provided.")
@@ -122,14 +186,18 @@ def _build_suggestions(grading_tool_output: dict, execution: dict) -> list[Analy
         else:
             message = "AI review found minor improvement opportunities."
 
-        suggestions.append(
-            _suggestion_at_line(
-                line_number=1,
-                severity=severity,
-                message=f"{message} {explanation}",
-                source="ai",
+        repeated_print = _build_repetition_suggestion(code)
+        if repeated_print:
+            suggestions.append(repeated_print)
+        else:
+            suggestions.append(
+                _suggestion_at_line(
+                    line_number=1,
+                    severity=severity,
+                    message=f"{message} {explanation}",
+                    source="ai",
+                )
             )
-        )
     elif "error" in grading_tool_output:
         suggestions.append(
             _suggestion_at_line(
@@ -461,6 +529,7 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
         suggestions=_build_suggestions(
             fallback_result["grading_tool_output"],
             fallback_result["execution"],
+            payload.code,
         ),
         model="grading-core-fallback",
         analysis_time_ms=max(0, elapsed_ms),

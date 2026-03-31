@@ -1,4 +1,5 @@
-const ANALYZE_DEBOUNCE_MS = 120;
+const ANALYZE_DEBOUNCE_MS = 300;
+const SNAPSHOT_DEDUPE_WINDOW_MS = 2500;
 
 const tabState = new Map();
 
@@ -106,6 +107,16 @@ function normalizeSuggestion(item, index, code, sourceMode) {
   const canonicalSeverity = toCanonicalSeverity(anchored?.severity);
   const legacySeverity = toLegacySeverity(canonicalSeverity);
   const message = String(anchored?.message || "Potential issue detected.");
+  const messageLower = message.toLowerCase();
+
+  let inferredCategory = "maintainability";
+  if (/syntax|indent|parse|unexpected token|unclosed|mismatch/.test(messageLower)) {
+    inferredCategory = "syntax";
+  } else if (/runtime|traceback|exception|timed out|non-zero|nameerror|typeerror|valueerror|indexerror/.test(messageLower)) {
+    inferredCategory = "runtime";
+  } else if (/logic|correctness|wrong|off-by-one|incorrect|unexpected behavior/.test(messageLower)) {
+    inferredCategory = "logic";
+  }
   const replacement = String(anchored?.fix?.replacement ?? anchored?.after ?? "");
   const fix = {
     replacement,
@@ -130,7 +141,7 @@ function normalizeSuggestion(item, index, code, sourceMode) {
 
     // Backward-compatible fields for existing sidebar/content flows.
     rule_id: String(anchored?.rule_id || `${sourceMode || "local"}.rule.${index + 1}`),
-    category: String(anchored?.category || "maintainability"),
+    category: String(anchored?.category || inferredCategory),
     rationale: String(anchored?.rationale || anchored?.message || "No rationale provided."),
     before: String(anchored?.before || ""),
     after: replacement,
@@ -141,9 +152,27 @@ function normalizeSuggestion(item, index, code, sourceMode) {
 }
 
 function normalizeResult(result, snapshot, sourceMode) {
-  const suggestions = (result?.suggestions || []).map((item, index) => normalizeSuggestion(item, index, snapshot.code, sourceMode));
+  const normalized = (result?.suggestions || []).map((item, index) => normalizeSuggestion(item, index, snapshot.code, sourceMode));
+  const deduped = [];
+  const seen = new Set();
+  for (const suggestion of normalized) {
+    const key = [
+      suggestion.line,
+      suggestion.col,
+      suggestion.end_line,
+      suggestion.end_col,
+      suggestion.severity,
+      String(suggestion.message || "").trim().toLowerCase()
+    ].join("|");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(suggestion);
+  }
+
   return {
-    suggestions,
+    suggestions: deduped,
     model: result?.model || null,
     analysis_time_ms: Number(result?.analysis_time_ms || 0),
     execution: result?.execution || null,
@@ -154,6 +183,22 @@ function normalizeResult(result, snapshot, sourceMode) {
       mode: sourceMode
     }
   };
+}
+
+function shouldSkipDuplicateSnapshot(state, snapshot) {
+  if (!state?.snapshot || !snapshot) {
+    return false;
+  }
+
+  const sameCode = String(state.snapshot.code || "") === String(snapshot.code || "");
+  const sameLanguage = String(state.snapshot.language || "") === String(snapshot.language || "");
+  const sameSite = String(state.snapshot.site || "") === String(snapshot.site || "");
+  if (!sameCode || !sameLanguage || !sameSite) {
+    return false;
+  }
+
+  const updatedAt = Number(state.updatedAt || 0);
+  return Date.now() - updatedAt < SNAPSHOT_DEDUPE_WINDOW_MS;
 }
 
 function buildSuggestion(line, severity, message, rationale, ruleId) {
@@ -390,8 +435,20 @@ async function analyzeSnapshot(tabId, snapshot) {
   const frameId = snapshot.__frameId;
   const settings = await getSettings();
 
+  const prev = tabState.get(tabId) || {};
+  if (prev.analysisInFlight) {
+    tabState.set(tabId, {
+      ...prev,
+      queuedSnapshot: snapshot,
+      status: "collecting",
+      updatedAt: Date.now()
+    });
+    return;
+  }
+
   tabState.set(tabId, {
-    ...tabState.get(tabId),
+    ...prev,
+    analysisInFlight: true,
     status: "analyzing",
     updatedAt: Date.now()
   });
@@ -442,6 +499,19 @@ async function analyzeSnapshot(tabId, snapshot) {
       chrome.tabs.sendMessage(tabId, msg, { frameId }).catch(() => {});
     }
     chrome.tabs.sendMessage(tabId, msg).catch(() => {});
+  } finally {
+    const nextState = tabState.get(tabId) || {};
+    const queued = nextState.queuedSnapshot || null;
+    tabState.set(tabId, {
+      ...nextState,
+      analysisInFlight: false,
+      queuedSnapshot: null,
+      updatedAt: Date.now()
+    });
+
+    if (queued) {
+      analyzeSnapshot(tabId, queued).catch(() => {});
+    }
   }
 }
 
@@ -490,6 +560,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ...message.payload,
       __frameId: sender.frameId
     };
+    const currentState = tabState.get(tabId) || {};
+    if (shouldSkipDuplicateSnapshot(currentState, payload)) {
+      sendResponse({ ok: true, deduped: true });
+      return true;
+    }
+
     getSettings().then((settings) => {
       if (!settings.autoAnalyze) {
         tabState.set(tabId, {

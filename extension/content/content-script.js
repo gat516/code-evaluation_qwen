@@ -18,6 +18,7 @@ const INLINE_CARD_ID = "cc-inline-card";
 const HIGHLIGHT_CLASS = "cc-inline-highlight";
 const OVERLAY_LAYER_ID = "cc-inline-overlay-layer";
 const OVERLAY_HIGHLIGHT_CLASS = "cc-inline-overlay-highlight";
+const CARD_HIDE_DELAY_MS = 140;
 
 let latestResult = null;
 let activeSuggestionByKey = new Map();
@@ -28,6 +29,8 @@ let runtimeSettings = {
   idleTimeout: 3000
 };
 let overlayRafId = 0;
+let cardHideTimer = 0;
+const dismissedSuggestionKeys = new Set();
 
 function hasExtensionContext() {
   return !!(globalThis.chrome && chrome.runtime && chrome.runtime.id);
@@ -902,6 +905,10 @@ function getOrCreateInlineCard() {
 
 function showInlineCard(suggestion, rect) {
   const card = getOrCreateInlineCard();
+  if (cardHideTimer) {
+    clearTimeout(cardHideTimer);
+    cardHideTimer = 0;
+  }
   const severityToken = String(suggestion?.legacySeverity || suggestion?.severity || "info").toLowerCase();
   const sevClass = severityToken === "high" || severityToken === "error"
     ? "cc-high"
@@ -913,13 +920,18 @@ function showInlineCard(suggestion, rect) {
   const fixText = suggestion?.after || suggestion?.fix?.replacement || "";
   const hasFix = !!String(fixText).trim();
   const actionText = hasFix ? "Copy suggested fix" : "Copy suggestion details";
+  const canApply = !!String(suggestion?.rule_id || "").trim();
 
   card.className = sevClass;
   card.innerHTML = `
     <strong>${suggestion.message}</strong>
     <div><em>${suggestion.category || "issue"} | ${suggestion.severity || suggestion.legacySeverity || "info"}</em></div>
     <div class="cc-rationale">${suggestion.rationale || suggestion.message || "No details provided."}</div>
-    <div class="cc-actions"><button type="button" data-cc-action="copy-fix">${actionText}</button></div>
+    <div class="cc-actions">
+      ${canApply ? '<button type="button" data-cc-action="apply-fix">Apply Fix</button>' : ""}
+      <button type="button" data-cc-action="dismiss">Dismiss</button>
+      <button type="button" data-cc-action="copy-fix">${actionText}</button>
+    </div>
   `;
 
   const left = Math.min(window.innerWidth - 340, rect.left + 8);
@@ -931,11 +943,25 @@ function showInlineCard(suggestion, rect) {
 }
 
 function hideInlineCard() {
+  if (cardHideTimer) {
+    clearTimeout(cardHideTimer);
+    cardHideTimer = 0;
+  }
   const card = document.getElementById(INLINE_CARD_ID);
   if (card) {
     card.style.display = "none";
   }
   currentCardSuggestion = null;
+}
+
+function scheduleHideInlineCard() {
+  if (cardHideTimer) {
+    clearTimeout(cardHideTimer);
+  }
+  cardHideTimer = setTimeout(() => {
+    cardHideTimer = 0;
+    hideInlineCard();
+  }, CARD_HIDE_DELAY_MS);
 }
 
 function getOrCreateOverlayLayer() {
@@ -979,19 +1005,19 @@ function getSeverityClass(suggestion) {
 }
 
 function getSuggestionKey(suggestion, lineNumber) {
-  return `${suggestion.rule_id || suggestion.message || "rule"}:${lineNumber}`;
+  const start = Number(suggestion?.line || suggestion?.anchor?.line || lineNumber || 1);
+  const end = Number(suggestion?.end_line || start);
+  const message = String(suggestion?.message || "rule").trim().toLowerCase();
+  return `${suggestion.rule_id || "rule"}:${start}:${end}:${message}`;
 }
 
-function renderHighlightBox(layer, rect, suggestion, lineNumber) {
+function renderHighlightBox(layer, rect, key, severityClass) {
   if (!rect || rect.width <= 0 || rect.height <= 0) {
     return;
   }
 
-  const key = getSuggestionKey(suggestion, lineNumber);
-  activeSuggestionByKey.set(key, suggestion);
-
   const highlight = document.createElement("div");
-  highlight.className = `${OVERLAY_HIGHLIGHT_CLASS} ${getSeverityClass(suggestion)}`;
+  highlight.className = `${OVERLAY_HIGHLIGHT_CLASS} ${severityClass}`;
   highlight.dataset.ccKey = key;
   highlight.style.left = `${Math.max(0, rect.left)}px`;
   highlight.style.top = `${Math.max(0, rect.top)}px`;
@@ -1001,23 +1027,32 @@ function renderHighlightBox(layer, rect, suggestion, lineNumber) {
 }
 
 function renderOverlaysFromLineNodes(lineNodes, suggestions) {
-  const lineMap = new Map();
-  suggestions.forEach((suggestion) => {
-    const line = Number(suggestion?.line || suggestion?.anchor?.line);
-    if (line && Number.isInteger(line)) {
-      lineMap.set(line, suggestion);
-    }
-  });
-
   const layer = getOrCreateOverlayLayer();
-  lineMap.forEach((suggestion, lineNumber) => {
-    const lineNode = lineNodes[lineNumber - 1];
-    if (!lineNode || typeof lineNode.getBoundingClientRect !== "function") {
+
+  suggestions.forEach((suggestion) => {
+    const startLine = Number(suggestion?.line || suggestion?.anchor?.line || 1);
+    const endLineRaw = Number(suggestion?.end_line || suggestion?.endLine || startLine);
+    const endLine = Number.isInteger(endLineRaw) && endLineRaw >= startLine ? endLineRaw : startLine;
+    if (!Number.isInteger(startLine) || startLine < 1) {
       return;
     }
 
-    const rect = lineNode.getBoundingClientRect();
-    renderHighlightBox(layer, rect, suggestion, lineNumber);
+    const key = getSuggestionKey(suggestion, startLine);
+    if (dismissedSuggestionKeys.has(key)) {
+      return;
+    }
+    activeSuggestionByKey.set(key, suggestion);
+    const severityClass = getSeverityClass(suggestion);
+
+    for (let lineNumber = startLine; lineNumber <= endLine; lineNumber += 1) {
+      const lineNode = lineNodes[lineNumber - 1];
+      if (!lineNode || typeof lineNode.getBoundingClientRect !== "function") {
+        continue;
+      }
+
+      const rect = lineNode.getBoundingClientRect();
+      renderHighlightBox(layer, rect, key, severityClass);
+    }
   });
 }
 
@@ -1026,9 +1061,15 @@ function renderOverlayForElement(element, suggestion, lineNumber) {
     return;
   }
 
+  const key = getSuggestionKey(suggestion, lineNumber);
+  if (dismissedSuggestionKeys.has(key)) {
+    return;
+  }
+  activeSuggestionByKey.set(key, suggestion);
+
   const layer = getOrCreateOverlayLayer();
   const rect = element.getBoundingClientRect();
-  renderHighlightBox(layer, rect, suggestion, lineNumber);
+  renderHighlightBox(layer, rect, key, getSeverityClass(suggestion));
 }
 
 function getNormalizedSuggestions(suggestions) {
@@ -1062,24 +1103,33 @@ function attachHoverHandlers() {
   document.addEventListener("mousemove", (event) => {
     const card = event.target?.closest?.(`#${INLINE_CARD_ID}`);
     if (card) {
+      if (cardHideTimer) {
+        clearTimeout(cardHideTimer);
+        cardHideTimer = 0;
+      }
       return;
     }
 
     const target = event.target?.closest?.(`.${OVERLAY_HIGHLIGHT_CLASS}`);
     if (!target) {
-      hideInlineCard();
+      scheduleHideInlineCard();
       return;
+    }
+
+    if (cardHideTimer) {
+      clearTimeout(cardHideTimer);
+      cardHideTimer = 0;
     }
 
     const key = target.dataset.ccKey;
     if (!key) {
-      hideInlineCard();
+      scheduleHideInlineCard();
       return;
     }
 
     const suggestion = activeSuggestionByKey.get(key);
     if (!suggestion) {
-      hideInlineCard();
+      scheduleHideInlineCard();
       return;
     }
 
@@ -1088,8 +1138,35 @@ function attachHoverHandlers() {
   });
 
   document.addEventListener("click", async (event) => {
-    const button = event.target?.closest?.("#cc-inline-card [data-cc-action='copy-fix']");
+    const button = event.target?.closest?.("#cc-inline-card [data-cc-action]");
     if (!button || !currentCardSuggestion) {
+      return;
+    }
+
+    const action = button.dataset.ccAction;
+
+    if (action === "dismiss") {
+      const key = getSuggestionKey(currentCardSuggestion, Number(currentCardSuggestion?.line || currentCardSuggestion?.anchor?.line || 1));
+      dismissedSuggestionKeys.add(key);
+      renderInlineSuggestions(latestResult || { suggestions: [] });
+      return;
+    }
+
+    if (action === "apply-fix") {
+      const ruleId = currentCardSuggestion?.rule_id;
+      if (!ruleId) {
+        button.textContent = "No fix";
+        return;
+      }
+      const result = await applyQuickFix(ruleId, currentCardSuggestion);
+      button.textContent = result?.ok ? "Applied" : "Apply failed";
+      setTimeout(() => {
+        button.textContent = "Apply Fix";
+      }, 1200);
+      return;
+    }
+
+    if (action !== "copy-fix") {
       return;
     }
 
@@ -1283,6 +1360,7 @@ if (hasExtensionContext()) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "ANALYSIS_RESULT") {
       latestResult = message.payload;
+      dismissedSuggestionKeys.clear();
       renderInlineSuggestions(latestResult);
       return;
     }
