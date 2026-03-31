@@ -10,8 +10,3 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
-
-restart_backends.sh
-
-.github/agents/instructions.agent.md
-
