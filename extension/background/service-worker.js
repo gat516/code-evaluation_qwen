@@ -1,20 +1,9 @@
 const ANALYZE_DEBOUNCE_MS = 900;
 
 const tabState = new Map();
-const cache = new Map();
-
-function hashKey(input) {
-  let h = 0;
-  for (let i = 0; i < input.length; i += 1) {
-    h = (h << 5) - h + input.charCodeAt(i);
-    h |= 0;
-  }
-  return String(h);
-}
 
 async function getSettings() {
   const defaults = {
-    analysisMode: "ai",
     backendUrl: "http://127.0.0.1:8000",
     apiKey: "",
     broadDetection: false,
@@ -22,241 +11,6 @@ async function getSettings() {
   };
   const values = await chrome.storage.sync.get(defaults);
   return values;
-}
-
-function buildSuggestion({ ruleId, severity, category, message, rationale, before, after, confidence }) {
-  return {
-    rule_id: ruleId,
-    severity,
-    category,
-    message,
-    rationale,
-    before: before || null,
-    after: after || null,
-    confidence: confidence ?? 0.7
-  };
-}
-
-function detectSequentialCallRuns(lines) {
-  const runs = [];
-
-  const parse = (line) => {
-    const match = String(line || "").match(/^\s*([A-Za-z_][\w\.]*)\s*\(\s*(-?\d+)\s*\)\s*;?\s*$/);
-    if (!match) {
-      return null;
-    }
-    return {
-      callee: match[1],
-      value: Number(match[2])
-    };
-  };
-
-  let start = -1;
-  let callee = "";
-  let prevValue = 0;
-
-  const flushRun = (endIndexExclusive) => {
-    if (start === -1) {
-      return;
-    }
-    const count = endIndexExclusive - start;
-    if (count >= 3) {
-      const startValue = parse(lines[start])?.value;
-      const endValue = parse(lines[endIndexExclusive - 1])?.value;
-      if (Number.isInteger(startValue) && Number.isInteger(endValue)) {
-        runs.push({
-          start,
-          end: endIndexExclusive - 1,
-          count,
-          callee,
-          startValue,
-          endExclusive: endValue + 1
-        });
-      }
-    }
-    start = -1;
-    callee = "";
-    prevValue = 0;
-  };
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const parsed = parse(lines[i]);
-    if (!parsed) {
-      flushRun(i);
-      continue;
-    }
-
-    if (start === -1) {
-      start = i;
-      callee = parsed.callee;
-      prevValue = parsed.value;
-      continue;
-    }
-
-    const expected = prevValue + 1;
-    const samePattern = parsed.callee === callee && parsed.value === expected;
-    if (!samePattern) {
-      flushRun(i);
-      start = i;
-      callee = parsed.callee;
-      prevValue = parsed.value;
-      continue;
-    }
-
-    prevValue = parsed.value;
-  }
-
-  flushRun(lines.length);
-  return runs;
-}
-
-function withAnchor(suggestion, lineNumber) {
-  return {
-    ...suggestion,
-    anchor: lineNumber ? { line: lineNumber } : null
-  };
-}
-
-function analyzePython(code) {
-  const suggestions = [];
-  const lines = code.split("\n");
-  const sequentialRuns = detectSequentialCallRuns(lines);
-  if (sequentialRuns.length) {
-    const run = sequentialRuns.sort((a, b) => b.count - a.count)[0];
-    const before = lines.slice(run.start, run.end + 1).join("\n");
-    const after = `${run.callee}(i)`;
-    suggestions.push(withAnchor(
-      buildSuggestion({
-        ruleId: "python.loop.refactor",
-        severity: "medium",
-        category: "maintainability",
-        message: "Repeated sequential calls could be replaced with a loop.",
-        rationale: "Repeated incremental statements make the code harder to maintain and update.",
-        before,
-        after,
-        confidence: 0.86
-      }),
-      run.start + 1
-    ));
-  }
-
-  const dynamicExecLine = lines.findIndex((line) => /\beval\s*\(|\bexec\s*\(/.test(line)) + 1;
-  if (dynamicExecLine > 0) {
-    suggestions.push(withAnchor(
-      buildSuggestion({
-        ruleId: "python.unsafe.dynamic-exec",
-        severity: "high",
-        category: "security",
-        message: "Avoid eval/exec unless absolutely necessary.",
-        rationale: "Dynamic code execution can introduce injection vulnerabilities.",
-        confidence: 0.95
-      }),
-      dynamicExecLine
-    ));
-  }
-
-  const secretLine = lines.findIndex((line) => /password\s*=\s*["'][^"']+["']|api[_-]?key\s*=\s*["'][^"']+["']|token\s*=\s*["'][^"']+["']/.test(line.toLowerCase())) + 1;
-  if (secretLine > 0) {
-    suggestions.push(withAnchor(
-      buildSuggestion({
-        ruleId: "secrets.hardcoded",
-        severity: "high",
-        category: "security",
-        message: "Potential hardcoded secret detected.",
-        rationale: "Credentials should be loaded from environment variables or a secure secret store.",
-        confidence: 0.92
-      }),
-      secretLine
-    ));
-  }
-
-  const tabLine = lines.findIndex((line) => /\t/.test(line)) + 1;
-  if (tabLine > 0) {
-    suggestions.push(withAnchor(
-      buildSuggestion({
-        ruleId: "style.tabs",
-        severity: "low",
-        category: "style",
-        message: "Tabs detected in source.",
-        rationale: "Consistent spaces are easier to maintain across editors and teams.",
-        confidence: 0.66
-      }),
-      tabLine
-    ));
-  }
-
-  return suggestions;
-}
-
-function analyzeJavascript(code) {
-  const suggestions = [];
-  const lines = code.split("\n");
-
-  const evalLine = lines.findIndex((line) => /\beval\s*\(/.test(line)) + 1;
-  if (evalLine > 0) {
-    suggestions.push(withAnchor(
-      buildSuggestion({
-        ruleId: "js.unsafe.eval",
-        severity: "high",
-        category: "security",
-        message: "Avoid eval in JavaScript.",
-        rationale: "eval executes arbitrary code and can create severe security issues.",
-        confidence: 0.95
-      }),
-      evalLine
-    ));
-  }
-
-  const varLine = lines.findIndex((line) => /\bvar\b/.test(line)) + 1;
-  if (varLine > 0) {
-    suggestions.push(withAnchor(
-      buildSuggestion({
-        ruleId: "js.var.legacy",
-        severity: "low",
-        category: "style",
-        message: "Prefer let/const over var.",
-        rationale: "Block-scoped declarations reduce hoisting-related bugs.",
-        confidence: 0.83
-      }),
-      varLine
-    ));
-  }
-
-  return suggestions;
-}
-
-function analyzeCodeLocally(snapshot) {
-  const language = (snapshot.language || "python").toLowerCase();
-  const code = snapshot.code || "";
-  let suggestions = [];
-
-  if (language === "python") {
-    suggestions = analyzePython(code);
-  } else if (language === "javascript") {
-    suggestions = analyzeJavascript(code);
-  }
-
-  if (!suggestions.length && code.trim()) {
-    suggestions.push(
-      buildSuggestion({
-        ruleId: "info.no-issues",
-        severity: "low",
-        category: "info",
-        message: "No obvious issues detected by local rules.",
-        rationale: "This extension mode uses lightweight local heuristics only.",
-        confidence: 0.55
-      })
-    );
-  }
-
-  return {
-    suggestions,
-    metadata: {
-      analyzer: "local-rules",
-      language,
-      line_count: code.split("\n").length
-    }
-  };
 }
 
 function findLineForTokens(lines, tokens) {
@@ -295,28 +49,6 @@ function ensureAnchors(suggestions, code) {
       anchor: { line }
     };
   });
-}
-
-function mergeSuggestions(preferred, fallback) {
-  const merged = [];
-  const seen = new Set();
-
-  function add(item) {
-    if (!item || item.rule_id === "info.no-issues") {
-      return;
-    }
-    const key = `${item.rule_id}|${item.anchor?.line || 0}|${item.message || ""}`;
-    if (seen.has(key)) {
-      return;
-    }
-    seen.add(key);
-    merged.push(item);
-  }
-
-  (preferred || []).forEach(add);
-  (fallback || []).forEach(add);
-
-  return merged;
 }
 
 async function analyzeCodeWithBackend(snapshot, settings) {
@@ -378,7 +110,8 @@ async function requestValidatedFix(payload, settings) {
       code: payload.code,
       language: payload.language || "python",
       suggestion: payload.suggestion,
-      exec_timeout_s: 2
+      exec_timeout_s: 2,
+      preview_only: !!payload.previewOnly
     })
   });
 
@@ -408,25 +141,6 @@ async function setBadge(tabId, isSupported) {
 async function analyzeSnapshot(tabId, snapshot) {
   const frameId = snapshot.__frameId;
   const settings = await getSettings();
-  const mode = settings.analysisMode || "local";
-  const cacheKey = hashKey(`${mode}|${settings.backendUrl || ""}|${snapshot.language}|${snapshot.site}|${snapshot.code}`);
-
-  if (cache.has(cacheKey)) {
-    const cached = cache.get(cacheKey);
-    tabState.set(tabId, {
-      ...tabState.get(tabId),
-      status: "result",
-      result: cached,
-      updatedAt: Date.now()
-    });
-    const msg = { type: "ANALYSIS_RESULT", payload: cached };
-    if (Number.isInteger(frameId) && frameId >= 0) {
-      chrome.tabs.sendMessage(tabId, msg, { frameId }).catch(() => {});
-    }
-    // Also broadcast without frame targeting so whichever frame hosts the editor can render inline suggestions.
-    chrome.tabs.sendMessage(tabId, msg).catch(() => {});
-    return;
-  }
 
   tabState.set(tabId, {
     ...tabState.get(tabId),
@@ -435,41 +149,7 @@ async function analyzeSnapshot(tabId, snapshot) {
   });
 
   try {
-    let result;
-    let shouldCache = true;
-    if (mode === "ai") {
-      const localResult = analyzeCodeLocally(snapshot);
-      try {
-        const aiResult = await analyzeCodeWithBackend(snapshot, settings);
-        result = {
-          ...aiResult,
-          suggestions: mergeSuggestions(aiResult.suggestions || [], localResult.suggestions || []),
-          metadata: {
-            ...(aiResult.metadata || {}),
-            local_rules_merged: true,
-            fallback_mode: false
-          }
-        };
-      } catch (aiError) {
-        shouldCache = false;
-        result = {
-          ...localResult,
-          metadata: {
-            ...(localResult.metadata || {}),
-            analyzer: "local-rules",
-            mode: "local-fallback",
-            fallback_mode: true,
-            fallback_warning: "AI backend unavailable. Running local analysis.",
-            fallback_reason: String(aiError?.message || aiError || "AI backend unavailable")
-          }
-        };
-      }
-    } else {
-      result = analyzeCodeLocally(snapshot);
-    }
-    if (shouldCache) {
-      cache.set(cacheKey, result);
-    }
+    const result = await analyzeCodeWithBackend(snapshot, settings);
 
     tabState.set(tabId, {
       ...tabState.get(tabId),
@@ -584,6 +264,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "FORCE_REANALYZE" && tabId) {
+    const state = tabState.get(tabId);
+    if (state?.snapshot) {
+      analyzeSnapshot(tabId, state.snapshot).then(() => sendResponse({ ok: true }));
+      return true;
+    }
+    sendResponse({ ok: false, error: "No code snapshot available yet." });
+    return true;
+  }
+
   if (message?.type === "VALIDATE_QUICK_FIX") {
     getSettings()
       .then((settings) => requestValidatedFix(message.payload || {}, settings))
@@ -591,6 +281,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: !!result?.applied,
           fixedCode: result?.fixed_code || null,
+          candidateCode: result?.candidate_code || null,
           message: result?.message || "",
           validation: result?.validation || {}
         });

@@ -38,10 +38,12 @@ class FixRequest(BaseModel):
     language: str = Field(default="python")
     suggestion: Suggestion
     exec_timeout_s: int | None = Field(default=None, ge=1, le=30)
+    preview_only: bool = False
 
 
 class FixResponse(BaseModel):
     applied: bool
     fixed_code: str
+    candidate_code: str | None = None
     message: str
     validation: dict[str, Any] = Field(default_factory=dict)

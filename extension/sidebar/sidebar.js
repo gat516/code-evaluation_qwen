@@ -5,6 +5,20 @@ async function getActiveTabId() {
 
 let latestSuggestions = [];
 
+function clearPreview() {
+  const section = document.getElementById("previewSection");
+  section.classList.add("hidden");
+  document.getElementById("previewMeta").textContent = "";
+  document.getElementById("previewCode").textContent = "";
+}
+
+function renderPreview(message, code, source) {
+  const section = document.getElementById("previewSection");
+  section.classList.remove("hidden");
+  document.getElementById("previewMeta").textContent = `${message || "Preview generated."}${source ? ` | ${source}` : ""}`;
+  document.getElementById("previewCode").textContent = code || "No preview available.";
+}
+
 function hasQuickFix(item) {
   if (!item) {
     return false;
@@ -102,10 +116,39 @@ async function applyQuickFixToActiveTab(item) {
   }
 }
 
+async function previewQuickFixInActiveTab(item) {
+  const tabId = await getActiveTabId();
+  if (!tabId) {
+    setFeedback("No active tab.");
+    return;
+  }
+
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "PREVIEW_QUICK_FIX",
+      payload: {
+        ruleId: item.rule_id,
+        suggestion: item
+      }
+    });
+
+    if (!response?.ok) {
+      setFeedback(response?.error || "Unable to preview quick fix.");
+      return;
+    }
+
+    renderPreview(response.message, response.previewCode, response.source);
+    setFeedback("Preview ready.");
+  } catch {
+    setFeedback("Unable to reach page editor for preview.");
+  }
+}
+
 function renderSuggestions(items) {
   const root = document.getElementById("suggestions");
   root.innerHTML = "";
   latestSuggestions = items || [];
+  clearPreview();
 
   if (!items?.length) {
     root.textContent = "No suggestions yet.";
@@ -125,7 +168,8 @@ function renderSuggestions(items) {
       <p>${item.rationale}</p>
       <div class="item-actions">
         ${canApplyFix
-          ? `<button class="secondary" data-action="apply-fix" data-index="${index}">Apply quick fix</button>
+           ? `<button class="secondary" data-action="preview-fix" data-index="${index}">Preview fix</button>
+             <button class="secondary" data-action="apply-fix" data-index="${index}">Apply quick fix</button>
              ${canCopyFix ? `<button class="secondary" data-action="copy-fix" data-index="${index}">Copy quick fix</button>` : ""}`
           : `<span class="no-fix">No auto-fix available for this suggestion.</span>`}
       </div>
@@ -210,6 +254,12 @@ function onSuggestionActionClick(event) {
       return;
     }
     copyTextToClipboard(quickFix);
+  } else if (action === "preview-fix") {
+    if (!hasQuickFix(item)) {
+      setFeedback("No quick fix available for this suggestion.");
+      return;
+    }
+    previewQuickFixInActiveTab(item);
   } else if (action === "apply-fix") {
     if (!hasQuickFix(item)) {
       setFeedback("No quick fix available for this suggestion.");
@@ -224,3 +274,4 @@ document.getElementById("suggestions").addEventListener("click", onSuggestionAct
 
 refreshState();
 setInterval(refreshState, 1200);
+clearPreview();

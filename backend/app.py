@@ -414,9 +414,19 @@ def fix(payload: FixRequest, _: None = Depends(verify_api_key)) -> FixResponse:
     else:
         message = str(validation.get("reason") or ai_message or "No valid fix generated.")
 
+    if payload.preview_only:
+        return FixResponse(
+            applied=False,
+            fixed_code=payload.code,
+            candidate_code=fixed_code if fixed_code != payload.code else None,
+            message=message,
+            validation=validation,
+        )
+
     return FixResponse(
         applied=applied,
         fixed_code=fixed_code if applied else payload.code,
+        candidate_code=fixed_code if fixed_code != payload.code else None,
         message=message,
         validation=validation,
     )

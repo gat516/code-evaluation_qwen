@@ -97,6 +97,37 @@ button.secondary:hover {
   margin-top: 12px;
 }
 
+.preview {
+  margin-top: 12px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.preview.hidden {
+  display: none;
+}
+
+#previewMeta {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #475569;
+}
+
+#previewCode {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  background: #0b1020;
+  color: #dbeafe;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
 button {
   width: 100%;
   border: 1px solid #0f766e;
