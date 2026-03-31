@@ -38,20 +38,20 @@ function renderSummary(state) {
   status.textContent = `Status: ${state.status || "idle"}${state.site ? ` on ${state.site}` : ""}`;
 
   if (state.status === "error") {
-    summary.textContent = `Error: ${state.error || "Unknown backend error"}`;
+    summary.textContent = `Error: ${state.error || "Unknown analysis error"}`;
     renderSuggestions([]);
     return;
   }
 
-  const grade = state.result?.grading_tool_output?.grade;
-  const warning = state.result?.grading_tool_output?.security_warning;
-  if (typeof grade === "number") {
-    summary.textContent = `Score ${grade}/100${warning ? " | Security warning detected" : ""}`;
+  const suggestions = state.result?.suggestions || [];
+  const highCount = suggestions.filter((item) => item.severity === "high").length;
+  if (suggestions.length) {
+    summary.textContent = `${suggestions.length} suggestion(s)${highCount ? ` | ${highCount} high priority` : ""}`;
   } else {
     summary.textContent = "Analysis in progress or not available yet.";
   }
 
-  renderSuggestions(state.result?.suggestions || []);
+  renderSuggestions(suggestions);
 }
 
 async function refreshState() {

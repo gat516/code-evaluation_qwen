@@ -5,7 +5,6 @@
   "description": "Grammarly-style coding suggestions on supported coding websites.",
   "permissions": ["storage", "activeTab", "sidePanel"],
   "host_permissions": [
-    "http://localhost:8000/*",
     "https://onecompiler.com/*",
     "https://replit.com/*",
     "https://leetcode.com/*",

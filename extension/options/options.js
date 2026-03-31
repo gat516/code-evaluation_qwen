@@ -1,22 +1,16 @@
 const defaults = {
-  backendUrl: "http://localhost:8000",
   broadDetection: false,
-  autoAnalyze: true,
-  apiKey: ""
+  autoAnalyze: true
 };
 
 async function loadSettings() {
   const settings = await chrome.storage.sync.get(defaults);
-  document.getElementById("backendUrl").value = settings.backendUrl;
-  document.getElementById("apiKey").value = settings.apiKey || "";
   document.getElementById("broadDetection").checked = !!settings.broadDetection;
   document.getElementById("autoAnalyze").checked = !!settings.autoAnalyze;
 }
 
 async function saveSettings() {
   const next = {
-    backendUrl: document.getElementById("backendUrl").value.trim() || defaults.backendUrl,
-    apiKey: document.getElementById("apiKey").value.trim(),
     broadDetection: document.getElementById("broadDetection").checked,
     autoAnalyze: document.getElementById("autoAnalyze").checked
   };
