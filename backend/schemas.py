@@ -55,6 +55,14 @@ class Suggestion(BaseModel):
     after: str | None = None
     anchor: SuggestionAnchor | None = None
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Canonical analyze fields accepted by /fix to avoid schema-loss between endpoints.
+    line: int | None = Field(default=None, ge=1)
+    col: int | None = Field(default=None, ge=0)
+    end_line: int | None = Field(default=None, ge=1)
+    end_col: int | None = Field(default=None, ge=0)
+    fix: SuggestionFix | None = None
+    source: str | None = None
+    prefetched_fix: PrefetchedFix | None = None
 
 
 class AnalyzeResponse(BaseModel):

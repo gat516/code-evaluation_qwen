@@ -5,7 +5,7 @@ const tabState = new Map();
 
 async function getSettings() {
   const defaults = {
-    analysisMode: "local",
+    analysisMode: "ai",
     backendUrl: "http://127.0.0.1:8000",
     apiKey: "",
     broadDetection: false,
@@ -521,20 +521,9 @@ async function analyzeSnapshot(tabId, snapshot) {
 
   try {
     let result;
-    const mode = String(settings.analysisMode || "local").toLowerCase() === "ai" ? "ai" : "local";
+    const mode = String(settings.analysisMode || "ai").toLowerCase() === "ai" ? "ai" : "local";
     if (mode === "ai") {
-      try {
-        result = await analyzeCodeWithBackend(snapshot, settings);
-      } catch (error) {
-        const fallback = await analyzeCodeLocally(snapshot);
-        result = {
-          ...fallback,
-          metadata: {
-            ...(fallback.metadata || {}),
-            fallback_warning: String(error?.message || error || "AI analysis failed; using local fallback.")
-          }
-        };
-      }
+      result = await analyzeCodeWithBackend(snapshot, settings);
     } else {
       result = await analyzeCodeLocally(snapshot);
     }

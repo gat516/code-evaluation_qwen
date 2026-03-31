@@ -728,6 +728,35 @@ def fix(payload: FixRequest, _: None = Depends(verify_api_key)) -> FixResponse:
 
     suggestion = payload.suggestion
 
+    # Short-circuit when analyze already returned a validated candidate.
+    prefetched = suggestion.prefetched_fix
+    prefetched_code = str(getattr(prefetched, "fixed_code", "") or "")
+    if prefetched_code.strip():
+        validation = _validate_python_fix(payload.code, prefetched_code, payload.exec_timeout_s)
+        applied = bool(validation.get("syntax_ok") and validation.get("changed"))
+        message = str(
+            getattr(prefetched, "message", "")
+            or "Using prefetched fix candidate from analyze."
+        )
+
+        if payload.preview_only:
+            return FixResponse(
+                applied=False,
+                fixed_code=payload.code,
+                candidate_code=prefetched_code if prefetched_code != payload.code else None,
+                message=message,
+                validation=validation,
+            )
+
+        if applied:
+            return FixResponse(
+                applied=True,
+                fixed_code=prefetched_code,
+                candidate_code=prefetched_code,
+                message=message,
+                validation=validation,
+            )
+
     # Use a deterministic transform for repeated-print refactors to avoid weak-model full-file drift.
     if _is_repeated_print_suggestion(suggestion):
         deterministic_code = _apply_repeated_print_refactor(payload.code, suggestion)

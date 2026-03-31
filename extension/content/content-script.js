@@ -29,7 +29,7 @@ let currentCardSuggestion = null;
 let runtimeSettings = {
   autoAnalyze: true,
   idleTimeout: 3000,
-  analysisMode: "local"
+  analysisMode: "ai"
 };
 let overlayRafId = 0;
 let cardHideTimer = 0;
@@ -1400,13 +1400,13 @@ async function loadRuntimeSettings() {
   const settings = await safeStorageGet({
     autoAnalyze: true,
     idleTimeout: 3000,
-    analysisMode: "local"
+    analysisMode: "ai"
   });
   const nextIdle = Number(settings?.idleTimeout);
   runtimeSettings = {
     autoAnalyze: settings?.autoAnalyze !== false,
     idleTimeout: Number.isInteger(nextIdle) && nextIdle >= 500 ? nextIdle : 3000,
-    analysisMode: String(settings?.analysisMode || "local").toLowerCase() === "ai" ? "ai" : "local"
+    analysisMode: String(settings?.analysisMode || "ai").toLowerCase() === "ai" ? "ai" : "local"
   };
 }
 
