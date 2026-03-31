@@ -36,7 +36,8 @@ def build_analysis_messages(code: str, language: str, site: str | None, metadata
     system_prompt = (
         "You are a strict static analysis assistant for coding interview solutions. "
         "Return valid JSON only, with no markdown fences and no explanations outside JSON. "
-        "Focus on correctness and high-signal Python issues first."
+        "Focus on correctness and high-signal Python issues first. "
+        "Only emit suggestions that include an actionable concrete fix."
     )
 
     user_prompt = (
@@ -45,7 +46,9 @@ def build_analysis_messages(code: str, language: str, site: str | None, metadata
         "Each suggestion must include exactly: "
         "line, col, end_line, end_col, severity(error|warning|info), message, "
         "fix{replacement, range{startLine,startCol,endLine,endCol}}, source='ai'.\n"
-        "If there are no issues, return {'suggestions': []}.\n\n"
+        "Keep fixes minimal and syntactically valid. Prefer replacing the smallest correct range.\n"
+        "Return at most 3 suggestions, sorted by impact.\n"
+        "If there are no issues with actionable fixes, return {'suggestions': []}.\n\n"
         f"Metadata:\n{metadata_text}\n\n"
         f"Example JSON format:\n{schema_text}\n\n"
         f"Code:\n```{language}\n{code}\n```"

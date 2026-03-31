@@ -23,6 +23,12 @@ class SuggestionFix(BaseModel):
     range: SuggestionRange
 
 
+class PrefetchedFix(BaseModel):
+    fixed_code: str
+    message: str = ""
+    validation: dict[str, Any] = Field(default_factory=dict)
+
+
 class AnalyzeSuggestion(BaseModel):
     line: int = Field(ge=1)
     col: int = Field(ge=0)
@@ -32,6 +38,7 @@ class AnalyzeSuggestion(BaseModel):
     message: str
     fix: SuggestionFix
     source: str = "ai"
+    prefetched_fix: PrefetchedFix | None = None
 
 
 class SuggestionAnchor(BaseModel):

@@ -1224,6 +1224,9 @@ function getNormalizedSuggestions(suggestions) {
 }
 
 function hasRenderableFixSuggestion(suggestion) {
+  if (detectLanguageByUrl() === "python") {
+    return Boolean(String(suggestion?.prefetched_fix?.fixed_code || "").trim());
+  }
   const replacement = String(suggestion?.after || suggestion?.fix?.replacement || "").trim();
   const prefetchedCode = String(suggestion?.prefetched_fix?.fixed_code || "").trim();
   return Boolean(replacement || prefetchedCode);

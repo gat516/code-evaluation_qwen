@@ -15,6 +15,7 @@ from backend.schemas import (
     AnalyzeSuggestion,
     FixRequest,
     FixResponse,
+    PrefetchedFix,
     Suggestion,
     SuggestionFix,
     SuggestionRange,
@@ -484,6 +485,48 @@ def _apply_line_range_replace(code: str, start_line: int, end_line: int, after: 
     return "\n".join(lines[: start_line - 1] + replacement_lines + lines[end_line:])
 
 
+def _apply_suggestion_patch(code: str, suggestion: AnalyzeSuggestion) -> str:
+    fix = suggestion.fix
+    if not fix:
+        return code
+
+    replacement = _strip_code_fences(str(fix.replacement or ""))
+    if not replacement.strip():
+        return code
+
+    patch_range = fix.range
+    if not patch_range:
+        return code
+
+    return _apply_line_range_replace(
+        code,
+        int(patch_range.startLine),
+        int(patch_range.endLine),
+        replacement,
+    )
+
+
+def _hydrate_prefetched_fixes(code: str, suggestions: list[AnalyzeSuggestion], timeout_s: int | None) -> list[AnalyzeSuggestion]:
+    hydrated: list[AnalyzeSuggestion] = []
+    for suggestion in suggestions:
+        candidate = _apply_suggestion_patch(code, suggestion)
+        if candidate == code:
+            continue
+
+        validation = _validate_python_fix(code, candidate, timeout_s)
+        if not bool(validation.get("syntax_ok") and validation.get("changed")):
+            continue
+
+        suggestion.prefetched_fix = PrefetchedFix(
+            fixed_code=candidate,
+            message="Prefetched validated fix from analyze.",
+            validation=validation,
+        )
+        hydrated.append(suggestion)
+
+    return hydrated
+
+
 def _apply_ai_edits(code: str, edits: list[dict]) -> tuple[str, int]:
     current = code
     applied_count = 0
@@ -564,6 +607,8 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
             repeated_print = _build_repetition_suggestion(payload.code)
             if repeated_print:
                 suggestions = [repeated_print]
+
+        suggestions = _hydrate_prefetched_fixes(payload.code, suggestions, payload.exec_timeout_s)
 
         metadata["llm_raw_empty"] = not bool(content.strip())
 
