@@ -548,7 +548,16 @@ def fix(payload: FixRequest, _: None = Depends(verify_api_key)) -> FixResponse:
             },
         )
 
-    ai_fixed_code, ai_message = _apply_ai_python_fix(payload.code, payload.suggestion, payload.exec_timeout_s)
+    try:
+        ai_fixed_code, ai_message = _apply_ai_python_fix(payload.code, payload.suggestion, payload.exec_timeout_s)
+    except Exception as exc:  # noqa: BLE001 - normalize backend fix failures
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "fix_generation_timeout",
+                "message": f"AI fix generation failed or timed out: {exc}",
+            },
+        ) from exc
     validation = _validate_python_fix(payload.code, ai_fixed_code, payload.exec_timeout_s)
     applied = bool(validation.get("syntax_ok") and validation.get("changed"))
 

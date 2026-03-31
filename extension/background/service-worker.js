@@ -151,8 +151,28 @@ function normalizeSuggestion(item, index, code, sourceMode) {
   };
 }
 
+function isSuggestionRelevantToCode(suggestion, code) {
+  const text = `${suggestion?.message || ""} ${suggestion?.rationale || ""}`.toLowerCase();
+  const codeLower = String(code || "").toLowerCase();
+
+  // Guard against a common hallucination where model flags lowercase none/true/false when code doesn't contain it.
+  if (text.includes("nameerror") && text.includes("none") && !/\bnone\b/.test(codeLower)) {
+    return false;
+  }
+  if (text.includes("true") && text.includes("case-sensitive") && !/\btrue\b/.test(codeLower)) {
+    return false;
+  }
+  if (text.includes("false") && text.includes("case-sensitive") && !/\bfalse\b/.test(codeLower)) {
+    return false;
+  }
+
+  return true;
+}
+
 function normalizeResult(result, snapshot, sourceMode) {
-  const normalized = (result?.suggestions || []).map((item, index) => normalizeSuggestion(item, index, snapshot.code, sourceMode));
+  const normalized = (result?.suggestions || [])
+    .filter((item) => isSuggestionRelevantToCode(item, snapshot.code))
+    .map((item, index) => normalizeSuggestion(item, index, snapshot.code, sourceMode));
   const deduped = [];
   const seen = new Set();
   for (const suggestion of normalized) {

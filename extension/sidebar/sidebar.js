@@ -4,20 +4,58 @@ async function getActiveTabId() {
 }
 
 let latestSuggestions = [];
+let previewState = {
+  visible: false,
+  meta: "",
+  code: ""
+};
 
 function clearPreview() {
   const section = document.getElementById("previewSection");
   section.classList.add("hidden");
   document.getElementById("previewMeta").textContent = "";
   document.getElementById("previewCode").textContent = "";
+  previewState = {
+    visible: false,
+    meta: "",
+    code: ""
+  };
 }
 
 function renderPreview(message, code, source) {
   const section = document.getElementById("previewSection");
+  const meta = `${message || "Preview generated."}${source ? ` | ${source}` : ""}`;
+  const previewCode = code || "No preview available.";
   section.classList.remove("hidden");
-  document.getElementById("previewMeta").textContent = `${message || "Preview generated."}${source ? ` | ${source}` : ""}`;
-  document.getElementById("previewCode").textContent = code || "No preview available.";
+  document.getElementById("previewMeta").textContent = meta;
+  document.getElementById("previewCode").textContent = previewCode;
+  previewState = {
+    visible: true,
+    meta,
+    code: previewCode
+  };
 }
+
+function restorePreview() {
+  if (!previewState.visible) {
+    return;
+  }
+  const section = document.getElementById("previewSection");
+  section.classList.remove("hidden");
+  document.getElementById("previewMeta").textContent = previewState.meta;
+  document.getElementById("previewCode").textContent = previewState.code;
+}
+
+function suggestionsFingerprint(items) {
+  return JSON.stringify((items || []).map((item) => ({
+    rule: item?.rule_id || "",
+    msg: item?.message || "",
+    line: item?.line || item?.anchor?.line || 0,
+    sev: item?.severity || item?.legacySeverity || ""
+  })));
+}
+
+let lastSuggestionsFingerprint = "";
 
 function hasQuickFix(item) {
   if (!item) {
@@ -30,10 +68,6 @@ function hasQuickFix(item) {
   }
 
   if ((item.after && String(item.after).trim()) || (item?.fix?.replacement && String(item.fix.replacement).trim())) {
-    return true;
-  }
-
-  if (ruleId.startsWith("correctness.") || ruleId.startsWith("quality.") || ruleId.startsWith("security.")) {
     return true;
   }
 
@@ -152,7 +186,15 @@ function renderSuggestions(items) {
   const root = document.getElementById("suggestions");
   root.innerHTML = "";
   latestSuggestions = items || [];
-  clearPreview();
+
+  const nextFingerprint = suggestionsFingerprint(items);
+  const changed = nextFingerprint !== lastSuggestionsFingerprint;
+  lastSuggestionsFingerprint = nextFingerprint;
+  if (changed) {
+    clearPreview();
+  } else {
+    restorePreview();
+  }
 
   if (!items?.length) {
     root.textContent = "No suggestions yet.";
@@ -239,6 +281,7 @@ async function requestManualAnalyze() {
   if (!tabId) {
     return;
   }
+  clearPreview();
   await chrome.runtime.sendMessage({ type: "MANUAL_ANALYZE", tabId });
   await refreshState();
 }

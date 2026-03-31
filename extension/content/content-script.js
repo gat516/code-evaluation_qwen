@@ -629,6 +629,26 @@ function normalizeQuickFixSuggestion(ruleId, suggestion) {
   };
 }
 
+function canAttemptQuickFix(ruleId, suggestion) {
+  if (suggestion?.after && String(suggestion.after).trim()) {
+    return true;
+  }
+  if (suggestion?.fix?.replacement && String(suggestion.fix.replacement).trim()) {
+    return true;
+  }
+
+  const supported = new Set([
+    "python.loop.refactor",
+    "secrets.hardcoded",
+    "python.unsafe.dynamic-exec",
+    "style.tabs",
+    "js.var.legacy",
+    "js.unsafe.eval",
+    "security.warning"
+  ]);
+  return supported.has(String(ruleId || ""));
+}
+
 function shouldQueryBackendForQuickFix(ruleId) {
   if (!hasExtensionContext()) {
     return { allowed: false, reason: "Extension context unavailable for backend fix request." };
@@ -659,6 +679,10 @@ function shouldQueryBackendForQuickFix(ruleId) {
 }
 
 async function requestBackendQuickFix(code, ruleId, suggestion, previewOnly = false) {
+  if (!canAttemptQuickFix(ruleId, suggestion)) {
+    return { ok: false, reason: "This suggestion does not include an automatic fix." };
+  }
+
   const backendGate = shouldQueryBackendForQuickFix(ruleId);
   if (!backendGate.allowed) {
     return { ok: false, reason: backendGate.reason };
@@ -709,6 +733,10 @@ async function requestBackendQuickFix(code, ruleId, suggestion, previewOnly = fa
 }
 
 function requestLocalQuickFix(code, ruleId, suggestion) {
+  if (!canAttemptQuickFix(ruleId, suggestion)) {
+    return { ok: false, reason: "This suggestion does not include a local fix transform." };
+  }
+
   if (detectLanguageByUrl() === "python") {
     return { ok: false, reason: "Local Python fallback disabled: AI backend owns Python fixes." };
   }
@@ -920,7 +948,7 @@ function showInlineCard(suggestion, rect) {
   const fixText = suggestion?.after || suggestion?.fix?.replacement || "";
   const hasFix = !!String(fixText).trim();
   const actionText = hasFix ? "Copy suggested fix" : "Copy suggestion details";
-  const canApply = !!String(suggestion?.rule_id || "").trim();
+  const canApply = canAttemptQuickFix(suggestion?.rule_id, suggestion);
 
   card.className = sevClass;
   card.innerHTML = `
