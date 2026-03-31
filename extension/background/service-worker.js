@@ -18,150 +18,44 @@ async function getSettings() {
 
 function toCanonicalSeverity(input) {
   const raw = String(input || "").toLowerCase();
-  if (raw === "high" || raw === "error") {
-    return "error";
-  }
-  if (raw === "medium" || raw === "warning") {
-    return "warning";
-  }
+  if (raw === "high" || raw === "error") return "error";
+  if (raw === "medium" || raw === "warning") return "warning";
   return "info";
 }
 
 function toLegacySeverity(input) {
   const raw = String(input || "").toLowerCase();
-  if (raw === "error" || raw === "high") {
-    return "high";
-  }
-  if (raw === "warning" || raw === "medium") {
-    return "medium";
-  }
+  if (raw === "error" || raw === "high") return "high";
+  if (raw === "warning" || raw === "medium") return "medium";
   return "low";
 }
 
 function guessRangeLine(item, fallbackLine) {
   const line = Number(item?.line ?? item?.start_line ?? item?.end_line ?? item?.anchor?.line ?? fallbackLine);
-  if (Number.isInteger(line) && line >= 1) {
-    return line;
-  }
-  return fallbackLine;
+  return Number.isInteger(line) && line >= 1 ? line : fallbackLine;
 }
 
 function guessCol(input) {
   const col = Number(input);
-  if (Number.isInteger(col) && col >= 0) {
-    return col;
-  }
-  return 0;
+  return Number.isInteger(col) && col >= 0 ? col : 0;
 }
 
-function findLineForTokens(lines, tokens) {
-  for (let i = 0; i < lines.length; i += 1) {
-    const normalized = lines[i].toLowerCase();
-    if (tokens.some((token) => normalized.includes(token))) {
-      return i + 1;
-    }
-  }
-  return 1;
-}
+function normalizeSuggestion(item, index, code) {
+  const raw = item || {};
+  const line = guessRangeLine(raw, index + 1);
+  const col = guessCol(raw?.col ?? raw?.fix?.range?.startCol);
+  const endLine = guessRangeLine({ line: raw?.end_line, end_line: raw?.fix?.range?.endLine }, line);
+  const endCol = guessCol(raw?.end_col ?? raw?.fix?.range?.endCol ?? col);
 
-function inferRepeatedPrintRange(code, anchored) {
-  const text = `${anchored?.message || ""} ${anchored?.rationale || ""}`.toLowerCase();
-  if (!(text.includes("repeated") && text.includes("print"))) {
-    return null;
-  }
-
-  const lines = String(code || "").split("\n");
-  if (!lines.length) {
-    return null;
-  }
-
-  const baseLine = Number(anchored?.line || anchored?.anchor?.line || 1);
-  const startIdx = Number.isInteger(baseLine) && baseLine >= 1 ? baseLine - 1 : 0;
-  const normalize = (val) => String(val || "").trim();
-  const pivot = normalize(lines[startIdx] || "");
-  if (!pivot || !/^print\(.+\)$/.test(pivot)) {
-    return null;
-  }
-
-  let start = startIdx;
-  while (start - 1 >= 0 && normalize(lines[start - 1]) === pivot) {
-    start -= 1;
-  }
-
-  let end = startIdx;
-  while (end + 1 < lines.length && normalize(lines[end + 1]) === pivot) {
-    end += 1;
-  }
-
-  if (end - start + 1 < 2) {
-    return null;
-  }
-
-  return { startLine: start + 1, endLine: end + 1 };
-}
-
-function ensureAnchors(suggestions, code) {
-  const lines = (code || "").split("\n");
-  return (suggestions || []).map((item) => {
-    if (item?.anchor?.line) {
-      return item;
-    }
-
-    const searchBase = `${item?.message || ""} ${item?.rationale || ""}`.toLowerCase();
-    let line = 1;
-    if (searchBase.includes("eval") || searchBase.includes("exec")) {
-      line = findLineForTokens(lines, ["eval(", "exec("]);
-    } else if (searchBase.includes("secret") || searchBase.includes("password") || searchBase.includes("token") || searchBase.includes("api key")) {
-      line = findLineForTokens(lines, ["password", "token", "api_key", "apikey", "api-key"]);
-    } else if (searchBase.includes("print") || searchBase.includes("loop") || searchBase.includes("repeated")) {
-      line = findLineForTokens(lines, ["print(", "for ", "while "]);
-    } else if (searchBase.includes("tab")) {
-      line = findLineForTokens(lines, ["\t"]);
-    } else if (searchBase.includes("var") || searchBase.includes("let") || searchBase.includes("const")) {
-      line = findLineForTokens(lines, ["var ", "let ", "const "]);
-    }
-
-    return {
-      ...item,
-      anchor: { line }
-    };
-  });
-}
-
-function normalizeSuggestion(item, index, code, sourceMode) {
-  const anchored = ensureAnchors([item || {}], code)[0] || {};
-  const line = guessRangeLine(anchored, index + 1);
-  const col = guessCol(anchored?.col ?? anchored?.start_col ?? anchored?.fix?.range?.startCol);
-  let endLine = guessRangeLine({
-    line: anchored?.end_line,
-    start_line: anchored?.endLine,
-    end_line: anchored?.fix?.range?.endLine,
-    anchor: anchored?.anchor
-  }, line);
-  const inferredRange = inferRepeatedPrintRange(code, { ...anchored, line });
-  if (inferredRange) {
-    endLine = inferredRange.endLine;
-  }
-  const endCol = guessCol(anchored?.end_col ?? anchored?.endCol ?? anchored?.fix?.range?.endCol ?? col);
-
-  const canonicalSeverity = toCanonicalSeverity(anchored?.severity);
+  const canonicalSeverity = toCanonicalSeverity(raw?.severity);
   const legacySeverity = toLegacySeverity(canonicalSeverity);
-  const message = String(anchored?.message || "Potential issue detected.");
-  const messageLower = message.toLowerCase();
+  const message = String(raw?.message || "Potential issue detected.");
 
-  let inferredCategory = "maintainability";
-  if (/syntax|indent|parse|unexpected token|unclosed|mismatch/.test(messageLower)) {
-    inferredCategory = "syntax";
-  } else if (/runtime|traceback|exception|timed out|non-zero|nameerror|typeerror|valueerror|indexerror/.test(messageLower)) {
-    inferredCategory = "runtime";
-  } else if (/logic|correctness|wrong|off-by-one|incorrect|unexpected behavior/.test(messageLower)) {
-    inferredCategory = "logic";
-  }
-  const replacement = String(anchored?.fix?.replacement ?? anchored?.after ?? "");
+  const replacement = String(raw?.fix?.replacement ?? "");
   const fix = {
     replacement,
     range: {
-      startLine: inferredRange?.startLine || line,
+      startLine: line,
       startCol: col,
       endLine,
       endCol
@@ -169,7 +63,6 @@ function normalizeSuggestion(item, index, code, sourceMode) {
   };
 
   return {
-    // Canonical fields for the new architecture.
     line,
     col,
     end_line: endLine,
@@ -177,61 +70,41 @@ function normalizeSuggestion(item, index, code, sourceMode) {
     severity: canonicalSeverity,
     message,
     fix,
-    source: String(anchored?.source || sourceMode || "local"),
-    prefetched_fix: anchored?.prefetched_fix || null,
+    source: "ai",
+    legacySeverity,
 
-    // Backward-compatible fields for existing sidebar/content flows.
-    rule_id: String(anchored?.rule_id || `${sourceMode || "local"}.rule.${index + 1}`),
-    category: String(anchored?.category || inferredCategory),
-    rationale: String(anchored?.rationale || anchored?.message || "No rationale provided."),
-    before: String(anchored?.before || ""),
-    after: replacement,
+    // Fields the content script and sidebar still reference:
+    rule_id: String(raw?.rule_id || `ai.rule.${index + 1}`),
+    category: String(raw?.category || "issue"),
+    rationale: String(raw?.rationale || raw?.message || ""),
     anchor: { line },
-    confidence: typeof anchored?.confidence === "number" ? anchored.confidence : 0.6,
-    legacySeverity
+    confidence: typeof raw?.confidence === "number" ? raw.confidence : 0.6
   };
 }
 
 function isSuggestionRelevantToCode(suggestion, code) {
-  const text = `${suggestion?.message || ""} ${suggestion?.rationale || ""}`.toLowerCase();
+  const text = `${suggestion?.message || ""}`.toLowerCase();
   const codeLower = String(code || "").toLowerCase();
 
-  if (text.includes("no issues found") || text.includes("no issue found") || text.includes("no problems found") || text.includes("looks good")) {
+  if (text.includes("no issues found") || text.includes("no problems found") || text.includes("looks good")) {
     return false;
   }
-
-  // Guard against a common hallucination where model flags lowercase none/true/false when code doesn't contain it.
   if (text.includes("nameerror") && text.includes("none") && !/\bnone\b/.test(codeLower)) {
     return false;
   }
-  if (text.includes("true") && text.includes("case-sensitive") && !/\btrue\b/.test(codeLower)) {
-    return false;
-  }
-  if (text.includes("false") && text.includes("case-sensitive") && !/\bfalse\b/.test(codeLower)) {
-    return false;
-  }
-
   return true;
 }
 
-function normalizeResult(result, snapshot, sourceMode) {
+function normalizeResult(result, snapshot) {
   const normalized = (result?.suggestions || [])
     .filter((item) => isSuggestionRelevantToCode(item, snapshot.code))
-    .map((item, index) => normalizeSuggestion(item, index, snapshot.code, sourceMode));
+    .map((item, index) => normalizeSuggestion(item, index, snapshot.code));
+
   const deduped = [];
   const seen = new Set();
   for (const suggestion of normalized) {
-    const key = [
-      suggestion.line,
-      suggestion.col,
-      suggestion.end_line,
-      suggestion.end_col,
-      suggestion.severity,
-      String(suggestion.message || "").trim().toLowerCase()
-    ].join("|");
-    if (seen.has(key)) {
-      continue;
-    }
+    const key = `${suggestion.line}|${suggestion.end_line}|${suggestion.severity}|${suggestion.message.trim().toLowerCase()}`;
+    if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(suggestion);
   }
@@ -240,191 +113,25 @@ function normalizeResult(result, snapshot, sourceMode) {
     suggestions: deduped,
     model: result?.model || null,
     analysis_time_ms: Number(result?.analysis_time_ms || 0),
-    execution: result?.execution || null,
-    grading_tool_output: result?.grading_tool_output || null,
     metadata: {
       ...(result?.metadata || {}),
-      analyzer: sourceMode === "ai" ? "ai-backend" : "local-rules",
-      mode: sourceMode
+      analyzer: "ai-backend",
+      mode: "ai"
     }
   };
 }
 
 function shouldSkipDuplicateSnapshot(state, snapshot) {
-  if (!state?.snapshot || !snapshot) {
-    return false;
-  }
-
+  if (!state?.snapshot || !snapshot) return false;
   const sameCode = String(state.snapshot.code || "") === String(snapshot.code || "");
   const sameLanguage = String(state.snapshot.language || "") === String(snapshot.language || "");
   const sameSite = String(state.snapshot.site || "") === String(snapshot.site || "");
-  if (!sameCode || !sameLanguage || !sameSite) {
-    return false;
-  }
-
-  const updatedAt = Number(state.updatedAt || 0);
-  return Date.now() - updatedAt < SNAPSHOT_DEDUPE_WINDOW_MS;
-}
-
-function buildSuggestion(line, severity, message, rationale, ruleId) {
-  return {
-    line,
-    col: 0,
-    end_line: line,
-    end_col: 1,
-    severity,
-    message,
-    fix: {
-      replacement: "",
-      range: { startLine: line, startCol: 0, endLine: line, endCol: 1 }
-    },
-    source: "local",
-    rule_id: ruleId,
-    category: "correctness",
-    rationale,
-    anchor: { line },
-    confidence: 0.75
-  };
-}
-
-function analyzePythonLocally(code) {
-  const lines = String(code || "").split("\n");
-  const suggestions = [];
-
-  const blockStarts = /^\s*(if|for|while|def|class|elif|else|except|finally)\b/;
-  const commentOnly = /^\s*#/;
-
-  lines.forEach((line, idx) => {
-    const lineNo = idx + 1;
-    const trimmed = line.trim();
-    if (!trimmed || commentOnly.test(trimmed)) {
-      return;
-    }
-
-    if (blockStarts.test(trimmed) && !trimmed.endsWith(":")) {
-      suggestions.push(buildSuggestion(
-        lineNo,
-        "error",
-        "Block statement may be missing a trailing colon.",
-        "Python block starters like if/for/def/class should end with ':'.",
-        "python.syntax.missing-colon"
-      ));
-    }
-
-    if (/\b(if|while)\s+.+[^=!<>]=[^=].*:\s*$/.test(trimmed)) {
-      suggestions.push(buildSuggestion(
-        lineNo,
-        "error",
-        "Possible assignment used in condition.",
-        "Use '==' for comparison in Python conditions instead of '='.",
-        "python.correctness.assignment-in-condition"
-      ));
-    }
-
-    if (/\b(none|true|false)\b/.test(trimmed)) {
-      suggestions.push(buildSuggestion(
-        lineNo,
-        "warning",
-        "Python constants are case-sensitive.",
-        "Use None, True, and False with capital first letters.",
-        "python.name.case-sensitive-constants"
-      ));
-    }
-
-    if (/^\s*except\s*:\s*$/.test(trimmed)) {
-      suggestions.push(buildSuggestion(
-        lineNo,
-        "warning",
-        "Bare except catches all exceptions.",
-        "Catch specific exceptions to avoid hiding unexpected runtime failures.",
-        "python.exceptions.bare-except"
-      ));
-    }
-
-    if (/^\s*def\s+\w+\s*\([^)]*=\s*(\[\]|\{\})[^)]*\)\s*:/.test(trimmed)) {
-      suggestions.push(buildSuggestion(
-        lineNo,
-        "warning",
-        "Mutable default argument detected.",
-        "Use None as default and create a new list/dict inside the function.",
-        "python.correctness.mutable-default"
-      ));
-    }
-  });
-
-  const pairs = {
-    "(": ")",
-    "[": "]",
-    "{": "}"
-  };
-  const opening = Object.keys(pairs);
-  const closing = new Set(Object.values(pairs));
-  const stack = [];
-
-  lines.forEach((line, idx) => {
-    for (const ch of line) {
-      if (opening.includes(ch)) {
-        stack.push({ ch, line: idx + 1 });
-      } else if (closing.has(ch)) {
-        const top = stack[stack.length - 1];
-        if (!top || pairs[top.ch] !== ch) {
-          suggestions.push(buildSuggestion(
-            idx + 1,
-            "error",
-            "Mismatched closing bracket detected.",
-            "Bracket pairs should be balanced: (), [], and {}.",
-            "python.syntax.bracket-mismatch"
-          ));
-          return;
-        }
-        stack.pop();
-      }
-    }
-  });
-
-  if (stack.length) {
-    const top = stack[stack.length - 1];
-    suggestions.push(buildSuggestion(
-      top.line,
-      "error",
-      "Unclosed bracket detected.",
-      "A bracket appears to be opened but not closed.",
-      "python.syntax.unclosed-bracket"
-    ));
-  }
-
-  return {
-    suggestions,
-    model: "local-python-rules",
-    analysis_time_ms: 1,
-    metadata: {
-      source: "local",
-      language: "python"
-    }
-  };
-}
-
-async function analyzeCodeLocally(snapshot) {
-  const language = String(snapshot?.language || "python").toLowerCase();
-  if (language !== "python") {
-    return {
-      suggestions: [],
-      model: "local-rules",
-      analysis_time_ms: 1,
-      metadata: {
-        source: "local",
-        warning: `Local mode currently supports python; received ${language}.`
-      }
-    };
-  }
-  return analyzePythonLocally(snapshot.code || "");
+  if (!sameCode || !sameLanguage || !sameSite) return false;
+  return Date.now() - Number(state.updatedAt || 0) < SNAPSHOT_DEDUPE_WINDOW_MS;
 }
 
 async function analyzeCodeWithBackend(snapshot, settings) {
-  const headers = {
-    "Content-Type": "application/json"
-  };
-
+  const headers = { "Content-Type": "application/json" };
   if (settings.apiKey) {
     headers["X-API-Key"] = settings.apiKey;
   }
@@ -452,41 +159,8 @@ async function analyzeCodeWithBackend(snapshot, settings) {
   return response.json();
 }
 
-async function requestValidatedFix(payload, settings) {
-  const headers = {
-    "Content-Type": "application/json"
-  };
-
-  if (settings.apiKey) {
-    headers["X-API-Key"] = settings.apiKey;
-  }
-
-  const response = await fetch(`${settings.backendUrl}/fix`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      code: payload.code,
-      language: payload.language || "python",
-      suggestion: payload.suggestion,
-      exec_timeout_s: 2,
-      preview_only: !!payload.previewOnly
-    })
-  });
-
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    const msg = body?.detail?.message || body?.detail?.error || `Backend returned ${response.status}`;
-    throw new Error(msg);
-  }
-
-  return response.json();
-}
-
-
 async function setBadge(tabId, isSupported) {
-  if (!tabId) {
-    return;
-  }
+  if (!tabId) return;
   if (isSupported) {
     await chrome.action.enable(tabId);
     await chrome.action.setBadgeText({ tabId, text: "ON" });
@@ -503,44 +177,28 @@ async function analyzeSnapshot(tabId, snapshot) {
 
   const prev = tabState.get(tabId) || {};
   if (prev.analysisInFlight) {
-    tabState.set(tabId, {
-      ...prev,
-      queuedSnapshot: snapshot,
-      status: "collecting",
-      updatedAt: Date.now()
-    });
+    tabState.set(tabId, { ...prev, queuedSnapshot: snapshot, status: "collecting", updatedAt: Date.now() });
     return;
   }
 
-  tabState.set(tabId, {
-    ...prev,
-    analysisInFlight: true,
-    status: "analyzing",
-    updatedAt: Date.now()
-  });
+  tabState.set(tabId, { ...prev, analysisInFlight: true, status: "analyzing", updatedAt: Date.now() });
 
   try {
-    let result;
-    const mode = String(settings.analysisMode || "ai").toLowerCase() === "ai" ? "ai" : "local";
-    if (mode === "ai") {
-      result = await analyzeCodeWithBackend(snapshot, settings);
-    } else {
-      result = await analyzeCodeLocally(snapshot);
-    }
-
-    const normalizedResult = normalizeResult(result, snapshot, mode);
+    const result = await analyzeCodeWithBackend(snapshot, settings);
+    const normalizedResult = normalizeResult(result, snapshot);
 
     tabState.set(tabId, {
       ...tabState.get(tabId),
       status: "result",
       result: normalizedResult,
+      snapshot,
       updatedAt: Date.now()
     });
+
     const msg = { type: "ANALYSIS_RESULT", payload: normalizedResult };
     if (Number.isInteger(frameId) && frameId >= 0) {
       chrome.tabs.sendMessage(tabId, msg, { frameId }).catch(() => {});
     }
-    // Also broadcast without frame targeting so whichever frame hosts the editor can render inline suggestions.
     chrome.tabs.sendMessage(tabId, msg).catch(() => {});
   } catch (error) {
     tabState.set(tabId, {
@@ -557,13 +215,7 @@ async function analyzeSnapshot(tabId, snapshot) {
   } finally {
     const nextState = tabState.get(tabId) || {};
     const queued = nextState.queuedSnapshot || null;
-    tabState.set(tabId, {
-      ...nextState,
-      analysisInFlight: false,
-      queuedSnapshot: null,
-      updatedAt: Date.now()
-    });
-
+    tabState.set(tabId, { ...nextState, analysisInFlight: false, queuedSnapshot: null, updatedAt: Date.now() });
     if (queued) {
       analyzeSnapshot(tabId, queued).catch(() => {});
     }
@@ -572,22 +224,13 @@ async function analyzeSnapshot(tabId, snapshot) {
 
 function scheduleAnalyze(tabId, snapshot) {
   const current = tabState.get(tabId) || {};
-  if (current.timerId) {
-    clearTimeout(current.timerId);
-  }
+  if (current.timerId) clearTimeout(current.timerId);
 
   const timerId = setTimeout(async () => {
     await analyzeSnapshot(tabId, snapshot);
   }, ANALYZE_DEBOUNCE_MS);
 
-  tabState.set(tabId, {
-    ...current,
-    status: "collecting",
-    snapshot,
-    frameId: snapshot.__frameId,
-    timerId,
-    updatedAt: Date.now()
-  });
+  tabState.set(tabId, { ...current, status: "collecting", snapshot, frameId: snapshot.__frameId, timerId, updatedAt: Date.now() });
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -611,10 +254,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "CODE_SNAPSHOT" && tabId) {
-    const payload = {
-      ...message.payload,
-      __frameId: sender.frameId
-    };
+    const payload = { ...message.payload, __frameId: sender.frameId };
     const currentState = tabState.get(tabId) || {};
     if (shouldSkipDuplicateSnapshot(currentState, payload)) {
       sendResponse({ ok: true, deduped: true });
@@ -640,8 +280,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "GET_TAB_STATE") {
-    const requestedTabId = message.tabId;
-    sendResponse({ state: tabState.get(requestedTabId) || null });
+    sendResponse({ state: tabState.get(message.tabId) || null });
     return true;
   }
 
@@ -658,14 +297,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       analyzeSnapshot(requestedTabId, state.snapshot).then(() => sendResponse({ ok: true }));
       return true;
     }
-    // Ask content script to publish a fresh snapshot when sidebar refresh is clicked early.
     chrome.tabs.sendMessage(requestedTabId, { type: "REQUEST_SNAPSHOT_AND_ANALYZE" })
       .then((response) => {
-        if (response?.ok) {
-          sendResponse({ ok: true, requestedSnapshot: true });
-          return;
-        }
-        sendResponse({ ok: false, error: response?.error || "No code snapshot available yet." });
+        sendResponse(response?.ok ? { ok: true, requestedSnapshot: true } : { ok: false, error: response?.error || "No code snapshot available yet." });
       })
       .catch(() => {
         sendResponse({ ok: false, error: "No code snapshot available yet. Open a supported editor tab first." });
@@ -683,31 +317,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "VALIDATE_QUICK_FIX") {
-    getSettings()
-      .then((settings) => requestValidatedFix(message.payload || {}, settings))
-      .then((result) => {
-        sendResponse({
-          ok: !!result?.applied,
-          fixedCode: result?.fixed_code || null,
-          candidateCode: result?.candidate_code || null,
-          message: result?.message || "",
-          validation: result?.validation || {}
-        });
-      })
-      .catch((error) => {
-        sendResponse({ ok: false, error: String(error?.message || error || "Fix validation failed") });
-      });
-    return true;
-  }
-
   return false;
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   const state = tabState.get(tabId);
-  if (state?.timerId) {
-    clearTimeout(state.timerId);
-  }
+  if (state?.timerId) clearTimeout(state.timerId);
   tabState.delete(tabId);
 });

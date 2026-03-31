@@ -4,153 +4,45 @@ async function getActiveTabId() {
 }
 
 let latestSuggestions = [];
-let previewState = {
-  visible: false,
-  meta: "",
-  code: ""
-};
 
-function clearPreview() {
-  const section = document.getElementById("previewSection");
-  section.classList.add("hidden");
-  document.getElementById("previewMeta").textContent = "";
-  document.getElementById("previewCode").textContent = "";
-  previewState = {
-    visible: false,
-    meta: "",
-    code: ""
-  };
+function setFeedback(text) {
+  const el = document.getElementById("copyFeedback");
+  el.textContent = text;
+  if (text) setTimeout(() => { el.textContent = ""; }, 1400);
 }
 
-function renderPreview(message, code, source) {
-  const section = document.getElementById("previewSection");
-  const meta = `${message || "Preview generated."}${source ? ` | ${source}` : ""}`;
-  const previewCode = code || "No preview available.";
-  section.classList.remove("hidden");
-  document.getElementById("previewMeta").textContent = meta;
-  document.getElementById("previewCode").textContent = previewCode;
-  previewState = {
-    visible: true,
-    meta,
-    code: previewCode
-  };
-}
-
-function restorePreview() {
-  if (!previewState.visible) {
-    return;
-  }
-  const section = document.getElementById("previewSection");
-  section.classList.remove("hidden");
-  document.getElementById("previewMeta").textContent = previewState.meta;
-  document.getElementById("previewCode").textContent = previewState.code;
-}
-
-function suggestionsFingerprint(items) {
-  return JSON.stringify((items || []).map((item) => ({
-    rule: item?.rule_id || "",
-    msg: item?.message || "",
-    line: item?.line || item?.anchor?.line || 0,
-    sev: item?.severity || item?.legacySeverity || ""
-  })));
-}
-
-let lastSuggestionsFingerprint = "";
-
-function hasQuickFix(item) {
-  if (!item) {
-    return false;
-  }
-
-  const ruleId = String(item?.rule_id || "");
-  if (ruleId === "info.no-issues" || ruleId === "analysis.error") {
-    return false;
-  }
-
-  if ((item.after && String(item.after).trim()) || (item?.fix?.replacement && String(item.fix.replacement).trim())) {
-    return true;
-  }
-
-  const quickFixRules = new Set([
-    "python.loop.refactor",
-    "secrets.hardcoded",
-    "python.unsafe.dynamic-exec",
-    "style.tabs",
-    "js.var.legacy",
-    "js.unsafe.eval",
-    "security.warning"
-  ]);
-
-  return quickFixRules.has(item.rule_id);
-}
-
-function buildQuickFix(item) {
-  if (item?.after && String(item.after).trim()) {
-    return String(item.after);
-  }
-
-  if (item?.fix?.replacement && String(item.fix.replacement).trim()) {
-    return String(item.fix.replacement);
-  }
-
-  return null;
+function hasReplacement(item) {
+  return !!String(item?.fix?.replacement || "").trim();
 }
 
 async function copyTextToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
-    const feedback = document.getElementById("copyFeedback");
-    feedback.textContent = "Copied to clipboard.";
-    setTimeout(() => {
-      feedback.textContent = "";
-    }, 1200);
+    setFeedback("Copied to clipboard.");
   } catch {
-    const feedback = document.getElementById("copyFeedback");
-    feedback.textContent = "Copy failed.";
+    setFeedback("Copy failed.");
   }
-}
-
-function setFeedback(text) {
-  const feedback = document.getElementById("copyFeedback");
-  feedback.textContent = text;
-  if (!text) {
-    return;
-  }
-  setTimeout(() => {
-    feedback.textContent = "";
-  }, 1400);
 }
 
 async function applyQuickFixToActiveTab(item) {
   const tabId = await getActiveTabId();
-  if (!tabId) {
-    setFeedback("No active tab.");
-    return;
-  }
+  if (!tabId) { setFeedback("No active tab."); return; }
 
   try {
     const response = await chrome.tabs.sendMessage(tabId, {
       type: "APPLY_QUICK_FIX",
-      payload: {
-        ruleId: item.rule_id,
-        suggestion: item
-      }
+      payload: { suggestion: item }
     });
 
     if (response?.ok) {
-      if (response?.source === "backend-validated" || response?.source === "backend-prefetched") {
-        setFeedback("Quick fix applied (backend validated).");
-      } else {
-        setFeedback("Quick fix applied (local fallback).");
-      }
+      setFeedback("Fix applied.");
       await chrome.runtime.sendMessage({ type: "MANUAL_ANALYZE", tabId });
       await refreshState();
       return;
     }
-
-    setFeedback(response?.error || "Unable to apply quick fix.");
+    setFeedback(response?.error || "Unable to apply fix.");
   } catch {
-    setFeedback("Unable to reach page editor for auto-fix.");
+    setFeedback("Unable to reach page editor.");
   }
 }
 
@@ -159,39 +51,30 @@ function renderSuggestions(items) {
   root.innerHTML = "";
   latestSuggestions = items || [];
 
-  const nextFingerprint = suggestionsFingerprint(items);
-  const changed = nextFingerprint !== lastSuggestionsFingerprint;
-  lastSuggestionsFingerprint = nextFingerprint;
-  if (changed) {
-    clearPreview();
-  } else {
-    restorePreview();
-  }
-
   if (!items?.length) {
     root.textContent = "No suggestions yet.";
     return;
   }
 
   items.forEach((item, index) => {
-    const lineNumber = Number(item?.line || item?.anchor?.line);
-    const line = Number.isInteger(lineNumber) && lineNumber > 0 ? ` | line ${lineNumber}` : "";
-    const canApplyFix = hasQuickFix(item);
-    const quickFixPreview = buildQuickFix(item);
-    const canCopyFix = !!quickFixPreview;
-    const severityToken = String(item?.legacySeverity || item?.severity || "low").toLowerCase();
-    const cardSeverity = severityToken === "error" ? "high" : severityToken === "warning" ? "medium" : severityToken;
+    const lineNum = Number(item?.line || item?.anchor?.line);
+    const line = Number.isInteger(lineNum) && lineNum > 0 ? ` | line ${lineNum}` : "";
+    const canApply = hasReplacement(item);
+    const fixText = String(item?.fix?.replacement || "").trim();
+    const sevToken = String(item?.severity || item?.legacySeverity || "info").toLowerCase();
+    const cardSev = sevToken === "error" ? "high" : sevToken === "warning" ? "medium" : "low";
+
     const el = document.createElement("article");
-    el.className = `suggestion ${cardSeverity || "low"}`;
+    el.className = `suggestion ${cardSev}`;
     el.innerHTML = `
-      <div class="meta">${item.category || "issue"} | ${item.severity || item.legacySeverity || "info"}${line} | confidence ${Math.round((item.confidence || 0) * 100)}%</div>
+      <div class="meta">${item.category || "issue"} | ${item.severity || "info"}${line}</div>
       <strong>${item.message}</strong>
-      <p>${item.rationale || "No rationale provided."}</p>
+      <p>${item.rationale || item.message || ""}</p>
+      ${fixText ? `<pre class="fix-preview">${fixText.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</pre>` : ""}
       <div class="item-actions">
-        ${canApplyFix
-            ? `<button class="secondary" data-action="apply-fix" data-index="${index}">Apply quick fix</button>
-             ${canCopyFix ? `<button class="secondary" data-action="copy-fix" data-index="${index}">Copy quick fix</button>` : ""}`
-          : `<span class="no-fix">No auto-fix available for this suggestion.</span>`}
+        ${canApply ? `<button class="secondary" data-action="apply-fix" data-index="${index}">Apply Fix</button>` : ""}
+        ${fixText ? `<button class="secondary" data-action="copy-fix" data-index="${index}">Copy Fix</button>` : ""}
+        ${!canApply ? '<span class="no-fix">No auto-fix available.</span>' : ""}
       </div>
     `;
     root.appendChild(el);
@@ -213,9 +96,9 @@ function renderSummary(state) {
 
   const stateStatus = String(state.status || "idle");
   status.textContent = `Status: ${stateStatus}${state.site ? ` on ${state.site}` : ""}`;
-  const activeStates = new Set(["collecting", "analyzing"]);
+
   if (spinner) {
-    if (activeStates.has(stateStatus)) {
+    if (stateStatus === "collecting" || stateStatus === "analyzing") {
       spinner.classList.remove("hidden");
     } else {
       spinner.classList.add("hidden");
@@ -223,81 +106,53 @@ function renderSummary(state) {
   }
 
   if (stateStatus === "error") {
-    summary.textContent = `Error: ${state.error || "Unknown analysis error"}`;
+    summary.textContent = `Error: ${state.error || "Unknown"}`;
     renderSuggestions([]);
     return;
   }
 
   const suggestions = state.result?.suggestions || [];
-  const fallbackWarning = state.result?.metadata?.fallback_warning || "";
-  const highCount = suggestions.filter((item) => {
-    const token = String(item?.legacySeverity || item?.severity || "").toLowerCase();
-    return token === "high" || token === "error";
+  const highCount = suggestions.filter((s) => {
+    const t = String(s?.severity || s?.legacySeverity || "").toLowerCase();
+    return t === "error" || t === "high";
   }).length;
-  if (suggestions.length) {
-    summary.textContent = `${suggestions.length} suggestion(s)${highCount ? ` | ${highCount} high priority` : ""}${fallbackWarning ? ` | ${fallbackWarning}` : ""}`;
-  } else {
-    summary.textContent = fallbackWarning || "Analysis in progress or not available yet.";
-  }
 
-  if (fallbackWarning) {
-    status.textContent = `Status: ${state.status || "idle"}${state.site ? ` on ${state.site}` : ""} | local fallback`;
-  }
+  summary.textContent = suggestions.length
+    ? `${suggestions.length} suggestion(s)${highCount ? ` | ${highCount} high priority` : ""}`
+    : "Analysis in progress or not available yet.";
 
   renderSuggestions(suggestions);
 }
 
 async function refreshState() {
   const tabId = await getActiveTabId();
-  if (!tabId) {
-    renderSummary(null);
-    return;
-  }
-
+  if (!tabId) { renderSummary(null); return; }
   const response = await chrome.runtime.sendMessage({ type: "GET_TAB_STATE", tabId });
   renderSummary(response?.state || null);
 }
 
 async function requestManualAnalyze() {
   const tabId = await getActiveTabId();
-  if (!tabId) {
-    setFeedback("No active tab.");
-    return;
-  }
-  clearPreview();
+  if (!tabId) { setFeedback("No active tab."); return; }
   const response = await chrome.runtime.sendMessage({ type: "MANUAL_ANALYZE", tabId });
-  if (!response?.ok) {
-    setFeedback(response?.error || "Unable to trigger analysis.");
-  }
+  if (!response?.ok) setFeedback(response?.error || "Unable to trigger analysis.");
   await refreshState();
 }
 
 function onSuggestionActionClick(event) {
   const button = event.target.closest("button[data-action]");
-  if (!button) {
-    return;
-  }
-
+  if (!button) return;
   const index = Number(button.dataset.index);
-  if (Number.isNaN(index) || !latestSuggestions[index]) {
-    return;
-  }
-
+  if (Number.isNaN(index) || !latestSuggestions[index]) return;
   const item = latestSuggestions[index];
   const action = button.dataset.action;
 
   if (action === "copy-fix") {
-    const quickFix = buildQuickFix(item);
-    if (!quickFix) {
-      setFeedback("No quick fix available for this suggestion.");
-      return;
-    }
-    copyTextToClipboard(quickFix);
+    const text = String(item?.fix?.replacement || "").trim();
+    if (!text) { setFeedback("No fix to copy."); return; }
+    copyTextToClipboard(text);
   } else if (action === "apply-fix") {
-    if (!hasQuickFix(item)) {
-      setFeedback("No quick fix available for this suggestion.");
-      return;
-    }
+    if (!hasReplacement(item)) { setFeedback("No fix available."); return; }
     applyQuickFixToActiveTab(item);
   }
 }
@@ -307,4 +162,3 @@ document.getElementById("suggestions").addEventListener("click", onSuggestionAct
 
 refreshState();
 setInterval(refreshState, 1200);
-clearPreview();
