@@ -385,6 +385,52 @@ def _apply_python_fix(code: str, suggestion: Suggestion) -> str:
     return code
 
 
+def _is_repeated_print_suggestion(suggestion: Suggestion) -> bool:
+    text = f"{suggestion.message} {suggestion.rationale}".lower()
+    return "repeated" in text and "print" in text
+
+
+def _apply_repeated_print_refactor(code: str, suggestion: Suggestion) -> str:
+    replacement_text = (suggestion.after or "").strip()
+    if not replacement_text:
+        return code
+
+    replacement_lines = _strip_code_fences(replacement_text).splitlines()
+    if not replacement_lines:
+        return code
+
+    # Prefer the highlighted section when we can match it reliably.
+    anchor_line = suggestion.anchor.line if suggestion.anchor else None
+    lines = code.splitlines()
+    if not lines:
+        return code
+
+    anchor_idx = (anchor_line - 1) if isinstance(anchor_line, int) and anchor_line >= 1 else None
+    if anchor_idx is None or anchor_idx < 0 or anchor_idx >= len(lines):
+        return code
+
+    # Expand to the contiguous block around anchor and replace the full section.
+    def _norm(val: str) -> str:
+        return str(val or "").strip()
+
+    pivot = _norm(lines[anchor_idx])
+    if not pivot:
+        return code
+
+    start = anchor_idx
+    while start - 1 >= 0 and _norm(lines[start - 1]) == pivot:
+        start -= 1
+
+    end = anchor_idx
+    while end + 1 < len(lines) and _norm(lines[end + 1]) == pivot:
+        end += 1
+
+    if end - start + 1 < 2:
+        return code
+
+    return "\n".join(lines[:start] + replacement_lines + lines[end + 1 :])
+
+
 def _validate_python_fix(original_code: str, fixed_code: str, timeout_s: int | None) -> dict:
     if fixed_code == original_code:
         return {
@@ -570,8 +616,38 @@ def fix(payload: FixRequest, _: None = Depends(verify_api_key)) -> FixResponse:
             },
         )
 
+    suggestion = payload.suggestion
+
+    # Use a deterministic transform for repeated-print refactors to avoid weak-model full-file drift.
+    if _is_repeated_print_suggestion(suggestion):
+        deterministic_code = _apply_repeated_print_refactor(payload.code, suggestion)
+        validation = _validate_python_fix(payload.code, deterministic_code, payload.exec_timeout_s)
+        deterministic_applied = bool(validation.get("syntax_ok") and validation.get("changed"))
+
+        if payload.preview_only:
+            return FixResponse(
+                applied=False,
+                fixed_code=payload.code,
+                candidate_code=deterministic_code if deterministic_code != payload.code else None,
+                message=(
+                    "Deterministic repeated-print refactor preview generated."
+                    if deterministic_code != payload.code
+                    else "No applicable repeated-print section found near anchor."
+                ),
+                validation=validation,
+            )
+
+        if deterministic_applied:
+            return FixResponse(
+                applied=True,
+                fixed_code=deterministic_code,
+                candidate_code=deterministic_code,
+                message="Validated deterministic repeated-print refactor applied.",
+                validation=validation,
+            )
+
     try:
-        ai_fixed_code, ai_message = _apply_ai_python_fix(payload.code, payload.suggestion, payload.exec_timeout_s)
+        ai_fixed_code, ai_message = _apply_ai_python_fix(payload.code, suggestion, payload.exec_timeout_s)
     except Exception as exc:  # noqa: BLE001 - normalize backend fix failures
         raise HTTPException(
             status_code=504,

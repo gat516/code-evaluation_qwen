@@ -15,10 +15,12 @@ const EDITOR_SELECTORS = [
 
 const INLINE_STYLE_ID = "cc-inline-style";
 const INLINE_CARD_ID = "cc-inline-card";
+const LOADING_INDICATOR_ID = "cc-loading-indicator";
 const HIGHLIGHT_CLASS = "cc-inline-highlight";
 const OVERLAY_LAYER_ID = "cc-inline-overlay-layer";
 const OVERLAY_HIGHLIGHT_CLASS = "cc-inline-overlay-highlight";
 const CARD_HIDE_DELAY_MS = 140;
+const LOADING_INDICATOR_TIMEOUT_MS = 15000;
 
 let latestResult = null;
 let activeSuggestionByKey = new Map();
@@ -26,10 +28,12 @@ let hoverHandlersAttached = false;
 let currentCardSuggestion = null;
 let runtimeSettings = {
   autoAnalyze: true,
-  idleTimeout: 3000
+  idleTimeout: 3000,
+  analysisMode: "local"
 };
 let overlayRafId = 0;
 let cardHideTimer = 0;
+let loadingIndicatorTimer = 0;
 const dismissedSuggestionKeys = new Set();
 
 function hasExtensionContext() {
@@ -769,12 +773,14 @@ async function applyQuickFix(ruleId, suggestion) {
     return { ok: false, error: "No code found in active editor." };
   }
 
+  showLoadingIndicator("Applying backend fix...");
   const backendResult = await requestBackendQuickFix(original, ruleId, suggestion);
   let selectedResult = backendResult;
 
   // Python fixes are server-owned to keep behavior consistent with backend validation.
   if (detectLanguageByUrl() === "python") {
     if (!backendResult.ok) {
+      hideLoadingIndicator();
       return {
         ok: false,
         error: backendResult.reason || "Backend could not apply a safe fix."
@@ -783,6 +789,7 @@ async function applyQuickFix(ruleId, suggestion) {
   } else if (!backendResult.ok) {
     const localResult = requestLocalQuickFix(original, ruleId, suggestion);
     if (!localResult.ok) {
+      hideLoadingIndicator();
       return {
         ok: false,
         error: buildQuickFixFailure(backendResult.reason, localResult.reason)
@@ -793,6 +800,7 @@ async function applyQuickFix(ruleId, suggestion) {
 
   const wrote = setCodeInEditor(selectedResult.code);
   if (!wrote) {
+    hideLoadingIndicator();
     return { ok: false, error: "Unable to apply quick fix in this editor." };
   }
 
@@ -800,6 +808,9 @@ async function applyQuickFix(ruleId, suggestion) {
   const site = detectSite() || "broad-detection";
   publishSnapshot(site);
   safeSendMessage({ type: "FORCE_REANALYZE" });
+  if (runtimeSettings.analysisMode !== "ai") {
+    hideLoadingIndicator();
+  }
   return { ok: true, source: selectedResult.source };
 }
 
@@ -903,8 +914,79 @@ function ensureInlineStyles() {
       font-size: 11px;
       cursor: pointer;
     }
+    #${LOADING_INDICATOR_ID} {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      z-index: 2147483641;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid rgba(15, 23, 42, 0.15);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.98);
+      color: #0f172a;
+      font-size: 12px;
+      box-shadow: 0 6px 20px rgba(15, 23, 42, 0.14);
+      pointer-events: none;
+    }
+    #${LOADING_INDICATOR_ID} .cc-spinner {
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(15, 118, 110, 0.25);
+      border-top-color: #0f766e;
+      border-radius: 50%;
+      animation: cc-spin 0.85s linear infinite;
+    }
+    @keyframes cc-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
   `;
   document.head.appendChild(style);
+}
+
+function getOrCreateLoadingIndicator() {
+  let indicator = document.getElementById(LOADING_INDICATOR_ID);
+  if (indicator) {
+    return indicator;
+  }
+
+  indicator = document.createElement("div");
+  indicator.id = LOADING_INDICATOR_ID;
+  indicator.innerHTML = '<span class="cc-spinner"></span><span class="cc-label">Querying backend...</span>';
+  document.body.appendChild(indicator);
+  return indicator;
+}
+
+function showLoadingIndicator(label = "Querying backend...") {
+  ensureInlineStyles();
+  const indicator = getOrCreateLoadingIndicator();
+  const labelNode = indicator.querySelector(".cc-label");
+  if (labelNode) {
+    labelNode.textContent = label;
+  }
+  indicator.style.display = "inline-flex";
+
+  if (loadingIndicatorTimer) {
+    clearTimeout(loadingIndicatorTimer);
+  }
+  loadingIndicatorTimer = setTimeout(() => {
+    loadingIndicatorTimer = 0;
+    hideLoadingIndicator();
+  }, LOADING_INDICATOR_TIMEOUT_MS);
+}
+
+function hideLoadingIndicator() {
+  if (loadingIndicatorTimer) {
+    clearTimeout(loadingIndicatorTimer);
+    loadingIndicatorTimer = 0;
+  }
+  const indicator = document.getElementById(LOADING_INDICATOR_ID);
+  if (indicator) {
+    indicator.style.display = "none";
+  }
 }
 
 function getOrCreateInlineCard() {
@@ -1309,12 +1391,14 @@ async function shouldEnableBroadMode() {
 async function loadRuntimeSettings() {
   const settings = await safeStorageGet({
     autoAnalyze: true,
-    idleTimeout: 3000
+    idleTimeout: 3000,
+    analysisMode: "local"
   });
   const nextIdle = Number(settings?.idleTimeout);
   runtimeSettings = {
     autoAnalyze: settings?.autoAnalyze !== false,
-    idleTimeout: Number.isInteger(nextIdle) && nextIdle >= 500 ? nextIdle : 3000
+    idleTimeout: Number.isInteger(nextIdle) && nextIdle >= 500 ? nextIdle : 3000,
+    analysisMode: String(settings?.analysisMode || "local").toLowerCase() === "ai" ? "ai" : "local"
   };
 }
 
@@ -1345,6 +1429,10 @@ function publishSnapshot(site, force = false) {
     return;
   }
   lastCode = code;
+
+  if (runtimeSettings.analysisMode === "ai") {
+    showLoadingIndicator("Analyzing with backend...");
+  }
 
   safeSendMessage({
     type: "CODE_SNAPSHOT",
@@ -1423,7 +1511,7 @@ async function start() {
       if (areaName !== "sync") {
         return;
       }
-      if (!changes.autoAnalyze && !changes.idleTimeout) {
+      if (!changes.autoAnalyze && !changes.idleTimeout && !changes.analysisMode) {
         return;
       }
       loadRuntimeSettings().catch(() => {});
@@ -1437,10 +1525,12 @@ if (hasExtensionContext()) {
       latestResult = message.payload;
       dismissedSuggestionKeys.clear();
       renderInlineSuggestions(latestResult);
+      hideLoadingIndicator();
       return;
     }
     if (message?.type === "ANALYSIS_ERROR") {
       clearInlineHighlights();
+      hideLoadingIndicator();
       return;
     }
     if (message?.type === "APPLY_QUICK_FIX") {
