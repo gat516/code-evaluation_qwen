@@ -18,6 +18,12 @@
     <h1>Code Coach Settings</h1>
     <p>Configure detection and suggestion analysis behavior.</p>
 
+    <label for="analysisMode">Analysis mode</label>
+    <select id="analysisMode">
+      <option value="local">Local rules (fast, offline)</option>
+      <option value="ai">AI backend (deeper analysis)</option>
+    </select>
+
     <label for="backendUrl">Backend URL (AI mode)</label>
     <input id="backendUrl" type="text" placeholder="http://127.0.0.1:8000" />
 
@@ -31,6 +37,9 @@
     <div class="row">
       <label><input id="autoAnalyze" type="checkbox" /> Auto-analyze while typing</label>
     </div>
+
+    <label for="idleTimeout">Idle timeout (ms)</label>
+    <input id="idleTimeout" type="text" inputmode="numeric" placeholder="3000" />
 
     <button id="saveBtn">Save Settings</button>
     <div id="saved"></div>

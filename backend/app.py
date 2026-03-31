@@ -1,10 +1,24 @@
 import ast
+import os
 import re
+import time
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.schemas import AnalyzeRequest, AnalyzeResponse, FixRequest, FixResponse, Suggestion
+from backend.llm_client import LLMClientError, query_chat_completions
+from backend.parsing import parse_llm_suggestions
+from backend.prompting import build_analysis_messages
+from backend.schemas import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    AnalyzeSuggestion,
+    FixRequest,
+    FixResponse,
+    Suggestion,
+    SuggestionFix,
+    SuggestionRange,
+)
 from backend.security import get_cors_origins, verify_api_key
 from grading.core import analyze_submission, propose_fix_submission, run_student_code
 
@@ -21,11 +35,42 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "model": os.getenv("MODEL_ID", "qwen2.5")}
 
 
-def _build_suggestions(grading_tool_output: dict, execution: dict) -> list[Suggestion]:
-    suggestions: list[Suggestion] = []
+def _to_canonical_severity(input_severity: str) -> str:
+    normalized = (input_severity or "").strip().lower()
+    if normalized in ("high", "error"):
+        return "error"
+    if normalized in ("medium", "warning"):
+        return "warning"
+    return "info"
+
+
+def _suggestion_at_line(line_number: int, severity: str, message: str, source: str = "ai") -> AnalyzeSuggestion:
+    safe_line = max(1, int(line_number or 1))
+    return AnalyzeSuggestion(
+        line=safe_line,
+        col=0,
+        end_line=safe_line,
+        end_col=1,
+        severity=_to_canonical_severity(severity),
+        message=message,
+        fix=SuggestionFix(
+            replacement="",
+            range=SuggestionRange(
+                startLine=safe_line,
+                startCol=0,
+                endLine=safe_line,
+                endCol=1,
+            ),
+        ),
+        source=source,
+    )
+
+
+def _build_suggestions(grading_tool_output: dict, execution: dict) -> list[AnalyzeSuggestion]:
+    suggestions: list[AnalyzeSuggestion] = []
     grade = grading_tool_output.get("grade")
     explanation = grading_tool_output.get("explanation", "No explanation provided.")
     security_warning = bool(grading_tool_output.get("security_warning", False))
@@ -44,25 +89,21 @@ def _build_suggestions(grading_tool_output: dict, execution: dict) -> list[Sugge
           runtime_reason = f"Program exited with non-zero status: {exit_code}."
 
       suggestions.append(
-          Suggestion(
-              rule_id="correctness.runtime-error",
+          _suggestion_at_line(
+              line_number=1,
               severity="high",
-              category="correctness",
-              message="Code does not run successfully; fix runtime errors before quality review.",
-              rationale=runtime_reason,
-              confidence=1.0,
+              message=f"Code does not run successfully: {runtime_reason}",
+              source="ai",
           )
       )
 
     if security_warning:
         suggestions.append(
-            Suggestion(
-                rule_id="security.warning",
+            _suggestion_at_line(
+                line_number=1,
                 severity="high",
-                category="security",
-                message="Potentially dangerous code pattern detected.",
-                rationale=explanation,
-                confidence=0.8,
+                message=f"Potentially dangerous code pattern detected: {explanation}",
+                source="ai",
             )
         )
 
@@ -82,24 +123,20 @@ def _build_suggestions(grading_tool_output: dict, execution: dict) -> list[Sugge
             message = "AI review found minor improvement opportunities."
 
         suggestions.append(
-            Suggestion(
-                rule_id="quality.review",
+            _suggestion_at_line(
+                line_number=1,
                 severity=severity,
-                category="maintainability",
-                message=message,
-                rationale=explanation,
-                confidence=0.7,
+                message=f"{message} {explanation}",
+                source="ai",
             )
         )
     elif "error" in grading_tool_output:
         suggestions.append(
-            Suggestion(
-                rule_id="analysis.error",
+            _suggestion_at_line(
+                line_number=1,
                 severity="high",
-                category="system",
-                message="Unable to generate reliable grading output.",
-                rationale=str(grading_tool_output.get("error")),
-                confidence=1.0,
+                message=f"Unable to generate reliable grading output: {grading_tool_output.get('error')}",
+                source="ai",
             )
         )
 
@@ -376,18 +413,58 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
             },
         )
 
+    start = time.perf_counter()
+    metadata = {
+        "site": payload.site,
+        "language": payload.language,
+    }
+
     try:
-        result = analyze_submission(payload.code, timeout_s=payload.exec_timeout_s)
+        messages = build_analysis_messages(
+            code=payload.code,
+            language=payload.language,
+            site=payload.site,
+            metadata=payload.metadata,
+        )
+        model_name, content = query_chat_completions(messages)
+        parsed_suggestions = parse_llm_suggestions(content)
+        suggestions = [AnalyzeSuggestion(**item) for item in parsed_suggestions]
+        metadata["llm_raw_empty"] = not bool(content.strip())
+
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return AnalyzeResponse(
+            suggestions=suggestions,
+            model=model_name,
+            analysis_time_ms=max(0, elapsed_ms),
+            metadata=metadata,
+        )
+    except LLMClientError as exc:
+        metadata["llm_error"] = str(exc)
+    except Exception as exc:  # noqa: BLE001 - normalize unexpected failures
+        metadata["llm_error"] = f"Unexpected model analysis error: {exc}"
+
+    # Graceful server-side fallback keeps AI mode usable while model service is unstable.
+    try:
+        fallback_result = analyze_submission(payload.code, timeout_s=payload.exec_timeout_s)
     except Exception as exc:
         raise HTTPException(
             status_code=502,
             detail={"error": "analysis_failed", "message": str(exc)},
         ) from exc
 
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    metadata["fallback"] = "grading-core"
+    metadata["execution"] = fallback_result.get("execution", {})
+    metadata["grading_tool_output"] = fallback_result.get("grading_tool_output", {})
+
     return AnalyzeResponse(
-        execution=result["execution"],
-        grading_tool_output=result["grading_tool_output"],
-        suggestions=_build_suggestions(result["grading_tool_output"], result["execution"]),
+        suggestions=_build_suggestions(
+            fallback_result["grading_tool_output"],
+            fallback_result["execution"],
+        ),
+        model="grading-core-fallback",
+        analysis_time_ms=max(0, elapsed_ms),
+        metadata=metadata,
     )
 
 

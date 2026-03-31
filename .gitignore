@@ -13,3 +13,5 @@ __pycache__/
 
 restart_backends.sh
 
+.github/agents/instructions.agent.md
+

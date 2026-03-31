@@ -11,6 +11,29 @@ class AnalyzeRequest(BaseModel):
     exec_timeout_s: int | None = Field(default=None, ge=1, le=30)
 
 
+class SuggestionRange(BaseModel):
+    startLine: int = Field(ge=1)
+    startCol: int = Field(ge=0)
+    endLine: int = Field(ge=1)
+    endCol: int = Field(ge=0)
+
+
+class SuggestionFix(BaseModel):
+    replacement: str = ""
+    range: SuggestionRange
+
+
+class AnalyzeSuggestion(BaseModel):
+    line: int = Field(ge=1)
+    col: int = Field(ge=0)
+    end_line: int = Field(ge=1)
+    end_col: int = Field(ge=0)
+    severity: str
+    message: str
+    fix: SuggestionFix
+    source: str = "ai"
+
+
 class SuggestionAnchor(BaseModel):
     line: int | None = Field(default=None, ge=1)
 
@@ -28,9 +51,10 @@ class Suggestion(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    execution: dict[str, Any]
-    grading_tool_output: dict[str, Any]
-    suggestions: list[Suggestion]
+    suggestions: list[AnalyzeSuggestion]
+    model: str
+    analysis_time_ms: int = Field(ge=0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class FixRequest(BaseModel):

@@ -29,7 +29,7 @@ function hasQuickFix(item) {
     return false;
   }
 
-  if (item.after && String(item.after).trim()) {
+  if ((item.after && String(item.after).trim()) || (item?.fix?.replacement && String(item.fix.replacement).trim())) {
     return true;
   }
 
@@ -53,6 +53,10 @@ function hasQuickFix(item) {
 function buildQuickFix(item) {
   if (item?.after && String(item.after).trim()) {
     return String(item.after);
+  }
+
+  if (item?.fix?.replacement && String(item.fix.replacement).trim()) {
+    return String(item.fix.replacement);
   }
 
   return null;
@@ -156,16 +160,19 @@ function renderSuggestions(items) {
   }
 
   items.forEach((item, index) => {
-    const line = item?.anchor?.line ? ` | line ${item.anchor.line}` : "";
+    const lineNumber = Number(item?.line || item?.anchor?.line);
+    const line = Number.isInteger(lineNumber) && lineNumber > 0 ? ` | line ${lineNumber}` : "";
     const canApplyFix = hasQuickFix(item);
     const quickFixPreview = buildQuickFix(item);
     const canCopyFix = !!quickFixPreview;
+    const severityToken = String(item?.legacySeverity || item?.severity || "low").toLowerCase();
+    const cardSeverity = severityToken === "error" ? "high" : severityToken === "warning" ? "medium" : severityToken;
     const el = document.createElement("article");
-    el.className = `suggestion ${item.severity || "low"}`;
+    el.className = `suggestion ${cardSeverity || "low"}`;
     el.innerHTML = `
-      <div class="meta">${item.category} | ${item.severity}${line} | confidence ${Math.round((item.confidence || 0) * 100)}%</div>
+      <div class="meta">${item.category || "issue"} | ${item.severity || item.legacySeverity || "info"}${line} | confidence ${Math.round((item.confidence || 0) * 100)}%</div>
       <strong>${item.message}</strong>
-      <p>${item.rationale}</p>
+      <p>${item.rationale || "No rationale provided."}</p>
       <div class="item-actions">
         ${canApplyFix
            ? `<button class="secondary" data-action="preview-fix" data-index="${index}">Preview fix</button>
@@ -199,7 +206,10 @@ function renderSummary(state) {
 
   const suggestions = state.result?.suggestions || [];
   const fallbackWarning = state.result?.metadata?.fallback_warning || "";
-  const highCount = suggestions.filter((item) => item.severity === "high").length;
+  const highCount = suggestions.filter((item) => {
+    const token = String(item?.legacySeverity || item?.severity || "").toLowerCase();
+    return token === "high" || token === "error";
+  }).length;
   if (suggestions.length) {
     summary.textContent = `${suggestions.length} suggestion(s)${highCount ? ` | ${highCount} high priority` : ""}${fallbackWarning ? ` | ${fallbackWarning}` : ""}`;
   } else {

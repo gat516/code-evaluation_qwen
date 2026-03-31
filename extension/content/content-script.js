@@ -2,6 +2,7 @@ const ALLOWLIST = [
   { name: "onecompiler", hostIncludes: ["onecompiler.com"] },
   { name: "replit", hostIncludes: ["replit.com"] },
   { name: "leetcode", hostIncludes: ["leetcode.com"] },
+  { name: "neetcode", hostIncludes: ["neetcode.io"] },
   { name: "hackerrank", hostIncludes: ["hackerrank.com"] }
 ];
 
@@ -15,11 +16,18 @@ const EDITOR_SELECTORS = [
 const INLINE_STYLE_ID = "cc-inline-style";
 const INLINE_CARD_ID = "cc-inline-card";
 const HIGHLIGHT_CLASS = "cc-inline-highlight";
+const OVERLAY_LAYER_ID = "cc-inline-overlay-layer";
+const OVERLAY_HIGHLIGHT_CLASS = "cc-inline-overlay-highlight";
 
 let latestResult = null;
 let activeSuggestionByKey = new Map();
 let hoverHandlersAttached = false;
 let currentCardSuggestion = null;
+let runtimeSettings = {
+  autoAnalyze: true,
+  idleTimeout: 3000
+};
+let overlayRafId = 0;
 
 function hasExtensionContext() {
   return !!(globalThis.chrome && chrome.runtime && chrome.runtime.id);
@@ -808,6 +816,27 @@ function ensureInlineStyles() {
       text-decoration-color: #f59e0b;
       background: rgba(245, 158, 11, 0.09);
     }
+    #${OVERLAY_LAYER_ID} {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483638;
+      pointer-events: none;
+    }
+    .${OVERLAY_HIGHLIGHT_CLASS} {
+      position: fixed;
+      pointer-events: auto;
+      border-radius: 3px;
+      border-bottom: 2px wavy #ef4444;
+      background: rgba(239, 68, 68, 0.08);
+    }
+    .${OVERLAY_HIGHLIGHT_CLASS}.cc-medium {
+      border-bottom-color: #f97316;
+      background: rgba(249, 115, 22, 0.1);
+    }
+    .${OVERLAY_HIGHLIGHT_CLASS}.cc-low {
+      border-bottom-color: #f59e0b;
+      background: rgba(245, 158, 11, 0.09);
+    }
     .cc-inline-block-highlight {
       outline: 2px solid rgba(239, 68, 68, 0.4);
       outline-offset: 2px;
@@ -873,17 +902,23 @@ function getOrCreateInlineCard() {
 
 function showInlineCard(suggestion, rect) {
   const card = getOrCreateInlineCard();
-  const sevClass = suggestion.severity === "high" ? "cc-high" : suggestion.severity === "medium" ? "cc-medium" : "cc-low";
+  const severityToken = String(suggestion?.legacySeverity || suggestion?.severity || "info").toLowerCase();
+  const sevClass = severityToken === "high" || severityToken === "error"
+    ? "cc-high"
+    : severityToken === "medium" || severityToken === "warning"
+      ? "cc-medium"
+      : "cc-low";
   currentCardSuggestion = suggestion;
 
-  const hasFix = !!(suggestion.after && String(suggestion.after).trim());
+  const fixText = suggestion?.after || suggestion?.fix?.replacement || "";
+  const hasFix = !!String(fixText).trim();
   const actionText = hasFix ? "Copy suggested fix" : "Copy suggestion details";
 
   card.className = sevClass;
   card.innerHTML = `
     <strong>${suggestion.message}</strong>
-    <div><em>${suggestion.category} | ${suggestion.severity}</em></div>
-    <div class="cc-rationale">${suggestion.rationale}</div>
+    <div><em>${suggestion.category || "issue"} | ${suggestion.severity || suggestion.legacySeverity || "info"}</em></div>
+    <div class="cc-rationale">${suggestion.rationale || suggestion.message || "No details provided."}</div>
     <div class="cc-actions"><button type="button" data-cc-action="copy-fix">${actionText}</button></div>
   `;
 
@@ -903,7 +938,27 @@ function hideInlineCard() {
   currentCardSuggestion = null;
 }
 
+function getOrCreateOverlayLayer() {
+  let layer = document.getElementById(OVERLAY_LAYER_ID);
+  if (layer) {
+    return layer;
+  }
+
+  layer = document.createElement("div");
+  layer.id = OVERLAY_LAYER_ID;
+  document.body.appendChild(layer);
+  return layer;
+}
+
+function clearOverlayLayer() {
+  const layer = document.getElementById(OVERLAY_LAYER_ID);
+  if (layer) {
+    layer.innerHTML = "";
+  }
+}
+
 function clearInlineHighlights() {
+  clearOverlayLayer();
   document.querySelectorAll(`.${HIGHLIGHT_CLASS}`).forEach((el) => {
     el.classList.remove(HIGHLIGHT_CLASS, "cc-high", "cc-medium", "cc-low", "cc-inline-block-highlight");
     el.removeAttribute("data-cc-key");
@@ -913,34 +968,89 @@ function clearInlineHighlights() {
 }
 
 function getSeverityClass(suggestion) {
-  return suggestion.severity === "high" ? "cc-high" : suggestion.severity === "medium" ? "cc-medium" : "cc-low";
+  const severityToken = String(suggestion?.legacySeverity || suggestion?.severity || "info").toLowerCase();
+  if (severityToken === "high" || severityToken === "error") {
+    return "cc-high";
+  }
+  if (severityToken === "medium" || severityToken === "warning") {
+    return "cc-medium";
+  }
+  return "cc-low";
 }
 
 function getSuggestionKey(suggestion, lineNumber) {
   return `${suggestion.rule_id || suggestion.message || "rule"}:${lineNumber}`;
 }
 
-function applyHighlightsToLineNodes(lineNodes, suggestions) {
+function renderHighlightBox(layer, rect, suggestion, lineNumber) {
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    return;
+  }
+
+  const key = getSuggestionKey(suggestion, lineNumber);
+  activeSuggestionByKey.set(key, suggestion);
+
+  const highlight = document.createElement("div");
+  highlight.className = `${OVERLAY_HIGHLIGHT_CLASS} ${getSeverityClass(suggestion)}`;
+  highlight.dataset.ccKey = key;
+  highlight.style.left = `${Math.max(0, rect.left)}px`;
+  highlight.style.top = `${Math.max(0, rect.top)}px`;
+  highlight.style.width = `${Math.max(10, rect.width)}px`;
+  highlight.style.height = `${Math.max(6, rect.height)}px`;
+  layer.appendChild(highlight);
+}
+
+function renderOverlaysFromLineNodes(lineNodes, suggestions) {
   const lineMap = new Map();
   suggestions.forEach((suggestion) => {
-    const line = suggestion?.anchor?.line;
+    const line = Number(suggestion?.line || suggestion?.anchor?.line);
     if (line && Number.isInteger(line)) {
       lineMap.set(line, suggestion);
     }
   });
 
-  lineNodes.forEach((lineNode, index) => {
-    const lineNumber = index + 1;
-    const suggestion = lineMap.get(lineNumber);
-    if (!suggestion) {
+  const layer = getOrCreateOverlayLayer();
+  lineMap.forEach((suggestion, lineNumber) => {
+    const lineNode = lineNodes[lineNumber - 1];
+    if (!lineNode || typeof lineNode.getBoundingClientRect !== "function") {
       return;
     }
 
-    const key = getSuggestionKey(suggestion, lineNumber);
-    activeSuggestionByKey.set(key, suggestion);
-    lineNode.classList.add(HIGHLIGHT_CLASS, getSeverityClass(suggestion));
-    lineNode.dataset.ccKey = key;
+    const rect = lineNode.getBoundingClientRect();
+    renderHighlightBox(layer, rect, suggestion, lineNumber);
   });
+}
+
+function renderOverlayForElement(element, suggestion, lineNumber) {
+  if (!element || typeof element.getBoundingClientRect !== "function") {
+    return;
+  }
+
+  const layer = getOrCreateOverlayLayer();
+  const rect = element.getBoundingClientRect();
+  renderHighlightBox(layer, rect, suggestion, lineNumber);
+}
+
+function getNormalizedSuggestions(suggestions) {
+  return suggestions.map((item, index) => {
+    const line = Number(item?.line || item?.anchor?.line || index + 1);
+    return {
+      ...item,
+      line: Number.isInteger(line) && line > 0 ? line : index + 1,
+      anchor: { line: Number.isInteger(line) && line > 0 ? line : index + 1 }
+    };
+  });
+}
+
+function renderFallbackContainerOverlay(suggestions) {
+  const editorContainer = document.querySelector(".monaco-editor, .cm-editor, .CodeMirror, .ace_editor");
+  if (!editorContainer || !suggestions.length) {
+    return;
+  }
+
+  const firstSuggestion = suggestions[0];
+  const lineNumber = Number(firstSuggestion?.line || firstSuggestion?.anchor?.line || 1);
+  renderOverlayForElement(editorContainer, firstSuggestion, lineNumber);
 }
 
 function attachHoverHandlers() {
@@ -950,7 +1060,12 @@ function attachHoverHandlers() {
   hoverHandlersAttached = true;
 
   document.addEventListener("mousemove", (event) => {
-    const target = event.target?.closest?.(`.${HIGHLIGHT_CLASS}`);
+    const card = event.target?.closest?.(`#${INLINE_CARD_ID}`);
+    if (card) {
+      return;
+    }
+
+    const target = event.target?.closest?.(`.${OVERLAY_HIGHLIGHT_CLASS}`);
     if (!target) {
       hideInlineCard();
       return;
@@ -978,7 +1093,9 @@ function attachHoverHandlers() {
       return;
     }
 
-    const fixPayload = currentCardSuggestion.after || `${currentCardSuggestion.message}\n\n${currentCardSuggestion.rationale}`;
+    const fixPayload = currentCardSuggestion.after
+      || currentCardSuggestion?.fix?.replacement
+      || `${currentCardSuggestion.message}\n\n${currentCardSuggestion.rationale || "No rationale provided."}`;
     try {
       await navigator.clipboard.writeText(fixPayload);
       button.textContent = "Copied";
@@ -1001,56 +1118,52 @@ function renderInlineSuggestions(result) {
     return;
   }
 
-  const normalizedSuggestions = suggestions.map((item, index) => {
-    if (item?.anchor?.line) {
-      return item;
-    }
-    return {
-      ...item,
-      anchor: { line: index + 1 }
-    };
-  });
+  const normalizedSuggestions = getNormalizedSuggestions(suggestions);
 
   const monacoLines = Array.from(document.querySelectorAll(".monaco-editor .view-lines .view-line, .view-lines .view-line"));
   if (monacoLines.length) {
-    applyHighlightsToLineNodes(monacoLines, normalizedSuggestions);
+    renderOverlaysFromLineNodes(monacoLines, normalizedSuggestions);
     return;
   }
 
   const codeMirrorLines = Array.from(document.querySelectorAll(".cm-editor .cm-line, .cm-content .cm-line, .CodeMirror-code pre"));
   if (codeMirrorLines.length) {
-    applyHighlightsToLineNodes(codeMirrorLines, normalizedSuggestions);
+    renderOverlaysFromLineNodes(codeMirrorLines, normalizedSuggestions);
     return;
   }
 
   const aceLines = Array.from(document.querySelectorAll(".ace_line"));
   if (aceLines.length) {
-    applyHighlightsToLineNodes(aceLines, normalizedSuggestions);
+    renderOverlaysFromLineNodes(aceLines, normalizedSuggestions);
     return;
   }
 
   const textarea = document.querySelector("textarea");
   if (textarea) {
-    const key = getSuggestionKey(normalizedSuggestions[0], normalizedSuggestions[0]?.anchor?.line || 1);
-    activeSuggestionByKey.set(key, normalizedSuggestions[0]);
-    textarea.classList.add(HIGHLIGHT_CLASS, "cc-medium");
-    textarea.dataset.ccKey = key;
+    const firstSuggestion = normalizedSuggestions[0];
+    const lineNumber = Number(firstSuggestion?.line || firstSuggestion?.anchor?.line || 1);
+    renderOverlayForElement(textarea, firstSuggestion, lineNumber);
     return;
   }
 
-  const editorContainer = document.querySelector(".monaco-editor, .cm-editor, .CodeMirror, .ace_editor");
-  if (editorContainer) {
-    const firstSuggestion = normalizedSuggestions[0];
-    const key = getSuggestionKey(firstSuggestion, firstSuggestion?.anchor?.line || 1);
-    activeSuggestionByKey.set(key, firstSuggestion);
-    editorContainer.classList.add(HIGHLIGHT_CLASS, "cc-medium", "cc-inline-block-highlight");
-    editorContainer.dataset.ccKey = key;
-  }
+  renderFallbackContainerOverlay(normalizedSuggestions);
 }
 
 async function shouldEnableBroadMode() {
   const settings = await safeStorageGet({ broadDetection: false });
   return !!settings.broadDetection;
+}
+
+async function loadRuntimeSettings() {
+  const settings = await safeStorageGet({
+    autoAnalyze: true,
+    idleTimeout: 3000
+  });
+  const nextIdle = Number(settings?.idleTimeout);
+  runtimeSettings = {
+    autoAnalyze: settings?.autoAnalyze !== false,
+    idleTimeout: Number.isInteger(nextIdle) && nextIdle >= 500 ? nextIdle : 3000
+  };
 }
 
 async function isSupportedContext() {
@@ -1071,9 +1184,12 @@ async function isSupportedContext() {
 let lastCode = "";
 let timer = null;
 
-function publishSnapshot(site) {
+function publishSnapshot(site, force = false) {
   const code = extractCode();
-  if (!code || code === lastCode) {
+  if (!code) {
+    return;
+  }
+  if (!force && code === lastCode) {
     return;
   }
   lastCode = code;
@@ -1089,14 +1205,36 @@ function publishSnapshot(site) {
   });
 }
 
+function scheduleOverlayRerender() {
+  if (overlayRafId) {
+    cancelAnimationFrame(overlayRafId);
+  }
+
+  overlayRafId = requestAnimationFrame(() => {
+    overlayRafId = 0;
+    if (latestResult?.suggestions?.length) {
+      renderInlineSuggestions(latestResult);
+    }
+  });
+}
+
 function scheduleSnapshot(site) {
+  if (!runtimeSettings.autoAnalyze) {
+    return;
+  }
   if (timer) {
     clearTimeout(timer);
   }
-  timer = setTimeout(() => publishSnapshot(site), 600);
+  timer = setTimeout(() => publishSnapshot(site), runtimeSettings.idleTimeout);
+}
+
+function triggerManualAnalyze(site) {
+  publishSnapshot(site, true);
+  safeSendMessage({ type: "FORCE_REANALYZE" });
 }
 
 async function start() {
+  await loadRuntimeSettings();
   const status = await isSupportedContext();
 
   // In iframe-heavy sites, only the frame with editor should mark supported.
@@ -1115,11 +1253,30 @@ async function start() {
   publishSnapshot(status.site);
   requestLatestResultAndRender();
 
-  const observer = new MutationObserver(() => scheduleSnapshot(status.site));
-  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-
-  window.addEventListener("keyup", () => scheduleSnapshot(status.site));
+  window.addEventListener("keydown", (event) => {
+    if (event.ctrlKey && event.shiftKey && String(event.key || "").toLowerCase() === "a") {
+      event.preventDefault();
+      triggerManualAnalyze(status.site);
+      return;
+    }
+    scheduleSnapshot(status.site);
+  });
+  window.addEventListener("input", () => scheduleSnapshot(status.site), true);
   window.addEventListener("paste", () => scheduleSnapshot(status.site));
+  window.addEventListener("scroll", () => scheduleOverlayRerender(), true);
+  window.addEventListener("resize", () => scheduleOverlayRerender());
+
+  if (hasExtensionContext()) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "sync") {
+        return;
+      }
+      if (!changes.autoAnalyze && !changes.idleTimeout) {
+        return;
+      }
+      loadRuntimeSettings().catch(() => {});
+    });
+  }
 }
 
 if (hasExtensionContext()) {

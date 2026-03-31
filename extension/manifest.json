@@ -3,7 +3,7 @@
   "name": "Code Coach",
   "version": "0.1.0",
   "description": "Grammarly-style coding suggestions on supported coding websites.",
-  "permissions": ["storage", "activeTab", "sidePanel"],
+  "permissions": ["storage", "activeTab", "sidePanel", "scripting"],
   "host_permissions": [
     "http://localhost:8000/*",
     "http://127.0.0.1:8000/*",
@@ -11,6 +11,7 @@
     "https://onecompiler.com/*",
     "https://replit.com/*",
     "https://leetcode.com/*",
+    "https://neetcode.io/*",
     "https://www.hackerrank.com/*"
   ],
   "background": {
@@ -29,6 +30,7 @@
         "https://onecompiler.com/*",
         "https://replit.com/*",
         "https://leetcode.com/*",
+        "https://neetcode.io/*",
         "https://www.hackerrank.com/*"
       ],
       "js": ["content/content-script.js"],
