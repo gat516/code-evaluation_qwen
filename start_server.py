@@ -1,7 +1,7 @@
 import subprocess
 import os
 
-MODEL_PATH = os.getenv("MODEL_PATH", "Qwen/Qwen2.5-1.5B-Instruct")
+MODEL_PATH = os.getenv("MODEL_PATH", "Qwen/Qwen2.5-3B-Instruct")
 PORT = int(os.getenv("MODEL_SERVER_PORT", "30001"))
 HOST = os.getenv("MODEL_SERVER_HOST", "0.0.0.0")
 

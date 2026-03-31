@@ -201,17 +201,28 @@ function renderSuggestions(items) {
 function renderSummary(state) {
   const summary = document.getElementById("summary");
   const status = document.getElementById("status");
+  const spinner = document.getElementById("sidebarSpinner");
 
   if (!state) {
+    spinner?.classList.add("hidden");
     status.textContent = "Open a supported coding tab to start.";
     summary.textContent = "No active analysis state.";
     renderSuggestions([]);
     return;
   }
 
-  status.textContent = `Status: ${state.status || "idle"}${state.site ? ` on ${state.site}` : ""}`;
+  const stateStatus = String(state.status || "idle");
+  status.textContent = `Status: ${stateStatus}${state.site ? ` on ${state.site}` : ""}`;
+  const activeStates = new Set(["collecting", "analyzing"]);
+  if (spinner) {
+    if (activeStates.has(stateStatus)) {
+      spinner.classList.remove("hidden");
+    } else {
+      spinner.classList.add("hidden");
+    }
+  }
 
-  if (state.status === "error") {
+  if (stateStatus === "error") {
     summary.textContent = `Error: ${state.error || "Unknown analysis error"}`;
     renderSuggestions([]);
     return;

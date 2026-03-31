@@ -691,6 +691,11 @@ async function requestBackendQuickFix(code, ruleId, suggestion, previewOnly = fa
     return { ok: true, code: prefetchedCode, source: "backend-prefetched" };
   }
 
+  // For Python, fixes are prefetched during analysis; do not trigger a new backend query on click.
+  if (!previewOnly && detectLanguageByUrl() === "python") {
+    return { ok: false, reason: "Fix is not ready yet. Wait for analysis to finish and try again." };
+  }
+
   if (!canAttemptQuickFix(ruleId, suggestion)) {
     return { ok: false, reason: "This suggestion does not include an automatic fix." };
   }

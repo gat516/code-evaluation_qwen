@@ -65,6 +65,42 @@ function findLineForTokens(lines, tokens) {
   return 1;
 }
 
+function inferRepeatedPrintRange(code, anchored) {
+  const text = `${anchored?.message || ""} ${anchored?.rationale || ""}`.toLowerCase();
+  if (!(text.includes("repeated") && text.includes("print"))) {
+    return null;
+  }
+
+  const lines = String(code || "").split("\n");
+  if (!lines.length) {
+    return null;
+  }
+
+  const baseLine = Number(anchored?.line || anchored?.anchor?.line || 1);
+  const startIdx = Number.isInteger(baseLine) && baseLine >= 1 ? baseLine - 1 : 0;
+  const normalize = (val) => String(val || "").trim();
+  const pivot = normalize(lines[startIdx] || "");
+  if (!pivot || !/^print\(.+\)$/.test(pivot)) {
+    return null;
+  }
+
+  let start = startIdx;
+  while (start - 1 >= 0 && normalize(lines[start - 1]) === pivot) {
+    start -= 1;
+  }
+
+  let end = startIdx;
+  while (end + 1 < lines.length && normalize(lines[end + 1]) === pivot) {
+    end += 1;
+  }
+
+  if (end - start + 1 < 2) {
+    return null;
+  }
+
+  return { startLine: start + 1, endLine: end + 1 };
+}
+
 function ensureAnchors(suggestions, code) {
   const lines = (code || "").split("\n");
   return (suggestions || []).map((item) => {
@@ -97,12 +133,16 @@ function normalizeSuggestion(item, index, code, sourceMode) {
   const anchored = ensureAnchors([item || {}], code)[0] || {};
   const line = guessRangeLine(anchored, index + 1);
   const col = guessCol(anchored?.col ?? anchored?.start_col ?? anchored?.fix?.range?.startCol);
-  const endLine = guessRangeLine({
+  let endLine = guessRangeLine({
     line: anchored?.end_line,
     start_line: anchored?.endLine,
     end_line: anchored?.fix?.range?.endLine,
     anchor: anchored?.anchor
   }, line);
+  const inferredRange = inferRepeatedPrintRange(code, { ...anchored, line });
+  if (inferredRange) {
+    endLine = inferredRange.endLine;
+  }
   const endCol = guessCol(anchored?.end_col ?? anchored?.endCol ?? anchored?.fix?.range?.endCol ?? col);
 
   const canonicalSeverity = toCanonicalSeverity(anchored?.severity);
@@ -122,7 +162,7 @@ function normalizeSuggestion(item, index, code, sourceMode) {
   const fix = {
     replacement,
     range: {
-      startLine: line,
+      startLine: inferredRange?.startLine || line,
       startCol: col,
       endLine,
       endCol
@@ -474,11 +514,6 @@ async function prefetchFixesForSuggestions(snapshot, normalizedResult, settings)
   let prefetched = 0;
 
   for (const suggestion of suggestions) {
-    if (hasSuggestionFixReady(suggestion)) {
-      hydrated.push(suggestion);
-      continue;
-    }
-
     if (attempted >= PREFETCH_FIX_LIMIT || !shouldPrefetchFix(snapshot, suggestion)) {
       continue;
     }
@@ -504,9 +539,14 @@ async function prefetchFixesForSuggestions(snapshot, normalizedResult, settings)
           }
         });
         prefetched += 1;
+      } else if (hasSuggestionFixReady(suggestion)) {
+        hydrated.push(suggestion);
       }
     } catch {
       // Keep analysis resilient when fix prefetch fails.
+      if (hasSuggestionFixReady(suggestion)) {
+        hydrated.push(suggestion);
+      }
     }
   }
 
