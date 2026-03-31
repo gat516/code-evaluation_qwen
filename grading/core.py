@@ -34,6 +34,30 @@ GRADING_TOOL = [
     }
 ]
 
+FIX_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_code_fix",
+            "description": "Return a full corrected Python source file for the provided suggestion.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fixed_code": {
+                        "type": "string",
+                        "description": "Complete Python source code after applying the fix.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Short summary of what was changed.",
+                    },
+                },
+                "required": ["fixed_code"],
+            },
+        },
+    }
+]
+
 
 def _get_client() -> OpenAI:
     base_url = os.getenv("QWEN_BASE_URL", "http://localhost:30001/v1")
@@ -129,3 +153,56 @@ def analyze_submission(code: str, timeout_s: int | None = None) -> Dict[str, Any
         "execution": execution,
         "grading_tool_output": grading,
     }
+
+
+def propose_fix_submission(code: str, suggestion: Dict[str, Any], run_result: Dict[str, Any]) -> Dict[str, Any]:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an automated Python code-fix assistant. Apply only the minimum safe changes "
+                "needed to resolve the suggestion while preserving intended behavior. "
+                "Return the FULL updated file by calling the 'propose_code_fix' function."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Apply a fix for this suggestion.\n\n"
+                "--- ORIGINAL CODE ---\n"
+                f"{code}\n\n"
+                "--- SUGGESTION ---\n"
+                f"{json.dumps(suggestion)}\n\n"
+                "--- EXECUTION RESULT ---\n"
+                f"{json.dumps(run_result)}"
+            ),
+        },
+    ]
+
+    response = _get_client().chat.completions.create(
+        model=get_model_id(),
+        messages=messages,
+        tools=FIX_TOOL,
+        tool_choice="required",
+    )
+
+    try:
+        tool_calls = response.choices[0].message.tool_calls
+        if not tool_calls:
+            return {
+                "error": "model did not call fix function",
+                "raw_content": response.choices[0].message.content,
+            }
+
+        payload = json.loads(tool_calls[0].function.arguments)
+        fixed_code = str(payload.get("fixed_code") or "")
+        if fixed_code.strip().startswith("```"):
+            fixed_code = fixed_code.strip().strip("`")
+            if "\n" in fixed_code:
+                fixed_code = "\n".join(fixed_code.split("\n")[1:])
+        return {
+            "fixed_code": fixed_code,
+            "summary": payload.get("summary", ""),
+        }
+    except Exception as exc:
+        return {"error": f"failed to parse fix: {str(exc)}"}

@@ -10,13 +10,17 @@ function hasQuickFix(item) {
     return false;
   }
 
+  const ruleId = String(item?.rule_id || "");
+  if (ruleId === "info.no-issues" || ruleId === "analysis.error") {
+    return false;
+  }
+
   if (item.after && String(item.after).trim()) {
     return true;
   }
 
-  const text = `${item?.message || ""} ${item?.rationale || ""}`.toLowerCase();
-  if (item?.rule_id === "quality.review" || item?.rule_id === "quality.grade") {
-    return text.includes("repeated") && text.includes("print");
+  if (ruleId.startsWith("correctness.") || ruleId.startsWith("quality.") || ruleId.startsWith("security.")) {
+    return true;
   }
 
   const quickFixRules = new Set([
@@ -158,7 +162,9 @@ function renderSuggestions(items) {
 
   items.forEach((item, index) => {
     const line = item?.anchor?.line ? ` | line ${item.anchor.line}` : "";
-    const fixAvailable = hasQuickFix(item) && !!buildQuickFix(item);
+    const canApplyFix = hasQuickFix(item);
+    const quickFixPreview = buildQuickFix(item);
+    const canCopyFix = !!quickFixPreview;
     const el = document.createElement("article");
     el.className = `suggestion ${item.severity || "low"}`;
     el.innerHTML = `
@@ -166,9 +172,9 @@ function renderSuggestions(items) {
       <strong>${item.message}</strong>
       <p>${item.rationale}</p>
       <div class="item-actions">
-        ${fixAvailable
+        ${canApplyFix
           ? `<button class="secondary" data-action="apply-fix" data-index="${index}">Apply quick fix</button>
-             <button class="secondary" data-action="copy-fix" data-index="${index}">Copy quick fix</button>`
+             ${canCopyFix ? `<button class="secondary" data-action="copy-fix" data-index="${index}">Copy quick fix</button>` : ""}`
           : `<span class="no-fix">No auto-fix available for this suggestion.</span>`}
       </div>
     `;
@@ -253,8 +259,7 @@ function onSuggestionActionClick(event) {
     }
     copyTextToClipboard(quickFix);
   } else if (action === "apply-fix") {
-    const quickFix = buildQuickFix(item);
-    if (!quickFix) {
+    if (!hasQuickFix(item)) {
       setFeedback("No quick fix available for this suggestion.");
       return;
     }

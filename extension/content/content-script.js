@@ -624,17 +624,20 @@ function shouldQueryBackendForQuickFix(ruleId) {
     return { allowed: false, reason: `Backend quick-fix is disabled for ${language}.` };
   }
 
-  const backendRules = new Set([
-    "python.loop.refactor",
-    "secrets.hardcoded",
-    "python.unsafe.dynamic-exec",
-    "security.warning",
-    "quality.review",
-    "quality.grade"
+  const localOnlyRules = new Set([
+    "js.var.legacy",
+    "js.unsafe.eval"
   ]);
-
-  if (!backendRules.has(ruleId)) {
+  if (localOnlyRules.has(ruleId)) {
     return { allowed: false, reason: "Rule is handled locally and does not require backend validation." };
+  }
+
+  const disallowedRules = new Set([
+    "info.no-issues",
+    "analysis.error"
+  ]);
+  if (disallowedRules.has(ruleId)) {
+    return { allowed: false, reason: "Rule is informational and does not support automated fixes." };
   }
 
   return { allowed: true, reason: "Backend validation enabled." };
