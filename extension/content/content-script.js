@@ -677,6 +677,10 @@ async function requestBackendQuickFix(code, ruleId, suggestion) {
 }
 
 function requestLocalQuickFix(code, ruleId, suggestion) {
+  if (detectLanguageByUrl() === "python") {
+    return { ok: false, reason: "Local Python fallback disabled: AI backend owns Python fixes." };
+  }
+
   const localCode = applyQuickFixToCode(code, ruleId, normalizeQuickFixSuggestion(ruleId, suggestion));
   if (!localCode || localCode === code) {
     return { ok: false, reason: "Local fallback could not produce a safe edit for this suggestion." };

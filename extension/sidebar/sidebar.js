@@ -37,59 +37,11 @@ function hasQuickFix(item) {
 }
 
 function buildQuickFix(item) {
-  const text = `${item?.message || ""} ${item?.rationale || ""}`.toLowerCase();
-
   if (item?.after && String(item.after).trim()) {
     return String(item.after);
   }
 
-  switch (item.rule_id) {
-    case "quality.review":
-    case "quality.grade":
-      if (text.includes("repeated") && text.includes("print")) {
-        return "for i in range(1, 7):\n    print(i)";
-      }
-      return null;
-    case "python.loop.refactor":
-      if (item?.before && item?.after) {
-        const beforeLines = String(item.before)
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean);
-        const ints = beforeLines
-          .map((line) => line.match(/\(\s*(-?\d+)\s*\)/))
-          .filter(Boolean)
-          .map((m) => Number(m[1]));
-        const sequential = ints.length === beforeLines.length
-          && ints.every((v, idx) => idx === 0 || v === ints[idx - 1] + 1);
-        if (sequential && ints.length >= 2) {
-          const startValue = ints[0];
-          const endExclusive = ints[ints.length - 1] + 1;
-          return `for i in range(${startValue}, ${endExclusive}):\n    ${item.after}`;
-        }
-      }
-      return "for i in range(1, 6):\n    print(i)";
-    case "secrets.hardcoded":
-      return "import os\npassword = os.getenv(\"APP_PASSWORD\", \"\")\ntoken = os.getenv(\"APP_TOKEN\", \"\")";
-    case "python.unsafe.dynamic-exec":
-      return "import ast\nuser_input = input(\"value: \")\nparsed = ast.literal_eval(user_input)";
-    case "style.tabs":
-      return "Replace tab indentation with 4 spaces for consistent formatting.";
-    case "js.var.legacy":
-      return "Replace `var` declarations with `let` or `const` depending on mutability.";
-    case "js.unsafe.eval":
-      return "Avoid eval(); parse input explicitly (JSON.parse or validated parser).";
-    case "security.warning":
-      if (text.includes("secret") || text.includes("password") || text.includes("token") || text.includes("api key")) {
-        return "import os\npassword = os.getenv(\"APP_PASSWORD\", \"\")\ntoken = os.getenv(\"APP_TOKEN\", \"\")";
-      }
-      if (text.includes("eval") || text.includes("exec")) {
-        return "import ast\nuser_input = input(\"value: \")\nparsed = ast.literal_eval(user_input)";
-      }
-      return null;
-    default:
-      return null;
-  }
+  return null;
 }
 
 async function copyTextToClipboard(text) {

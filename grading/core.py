@@ -43,16 +43,45 @@ FIX_TOOL = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "edits": {
+                        "type": "array",
+                        "description": "Targeted edits to apply. Prefer these over full-file rewrites when possible.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "before": {
+                                    "type": "string",
+                                    "description": "Existing code snippet to replace.",
+                                },
+                                "after": {
+                                    "type": "string",
+                                    "description": "Replacement code snippet.",
+                                },
+                                "anchor_line": {
+                                    "type": "integer",
+                                    "description": "1-based preferred line for matching/replacement.",
+                                },
+                                "start_line": {
+                                    "type": "integer",
+                                    "description": "1-based inclusive range start for direct replacement.",
+                                },
+                                "end_line": {
+                                    "type": "integer",
+                                    "description": "1-based inclusive range end for direct replacement.",
+                                },
+                            },
+                        },
+                    },
                     "fixed_code": {
                         "type": "string",
-                        "description": "Complete Python source code after applying the fix.",
+                        "description": "Complete Python source code after applying the fix (use when section edits are not sufficient).",
                     },
                     "summary": {
                         "type": "string",
                         "description": "Short summary of what was changed.",
                     },
                 },
-                "required": ["fixed_code"],
+                "required": [],
             },
         },
     }
@@ -162,7 +191,9 @@ def propose_fix_submission(code: str, suggestion: Dict[str, Any], run_result: Di
             "content": (
                 "You are an automated Python code-fix assistant. Apply only the minimum safe changes "
                 "needed to resolve the suggestion while preserving intended behavior. "
-                "Return the FULL updated file by calling the 'propose_code_fix' function."
+                "Prefer targeted section edits and return them via 'edits'. "
+                "If edits are not reliable, return 'fixed_code' for the full file. "
+                "Always call the 'propose_code_fix' function."
             ),
         },
         {
@@ -202,6 +233,7 @@ def propose_fix_submission(code: str, suggestion: Dict[str, Any], run_result: Di
                 fixed_code = "\n".join(fixed_code.split("\n")[1:])
         return {
             "fixed_code": fixed_code,
+            "edits": payload.get("edits") or [],
             "summary": payload.get("summary", ""),
         }
     except Exception as exc:
