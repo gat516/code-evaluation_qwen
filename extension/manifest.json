@@ -1,4 +1,4 @@
-ssh char@10.144.50.20{
+{
   "manifest_version": 3,
   "name": "Code Coach",
   "version": "0.1.0",
