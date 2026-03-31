@@ -11,6 +11,10 @@ class AnalyzeRequest(BaseModel):
     exec_timeout_s: int | None = Field(default=None, ge=1, le=30)
 
 
+class SuggestionAnchor(BaseModel):
+    line: int | None = Field(default=None, ge=1)
+
+
 class Suggestion(BaseModel):
     rule_id: str
     severity: str
@@ -19,6 +23,7 @@ class Suggestion(BaseModel):
     rationale: str
     before: str | None = None
     after: str | None = None
+    anchor: SuggestionAnchor | None = None
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 

@@ -82,37 +82,139 @@ function detectLanguageByUrl() {
   return "python";
 }
 
+function getMonacoFocusedEditor() {
+  const monacoApi = window.monaco?.editor;
+  if (!monacoApi || typeof monacoApi.getEditors !== "function") {
+    return null;
+  }
+
+  try {
+    const editors = monacoApi.getEditors() || [];
+    if (!editors.length) {
+      return null;
+    }
+
+    const focused = editors.find((editor) => {
+      try {
+        return typeof editor.hasTextFocus === "function" && editor.hasTextFocus();
+      } catch {
+        return false;
+      }
+    });
+
+    return focused || editors[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+function extractFromMonacoApi() {
+  const editor = getMonacoFocusedEditor();
+  if (!editor) {
+    return "";
+  }
+
+  try {
+    if (typeof editor.getValue === "function") {
+      return editor.getValue() || "";
+    }
+    const model = typeof editor.getModel === "function" ? editor.getModel() : null;
+    if (model && typeof model.getValue === "function") {
+      return model.getValue() || "";
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
+function extractFromCodeMirrorApi() {
+  const cm6Root = document.querySelector(".cm-editor");
+  if (cm6Root) {
+    try {
+      const view = cm6Root.cmView?.view || cm6Root.cmView || cm6Root.view;
+      if (view?.state?.doc && typeof view.state.doc.toString === "function") {
+        return view.state.doc.toString() || "";
+      }
+    } catch {
+      // Fall through.
+    }
+  }
+
+  const cm5Root = document.querySelector(".CodeMirror");
+  if (cm5Root?.CodeMirror && typeof cm5Root.CodeMirror.getValue === "function") {
+    try {
+      return cm5Root.CodeMirror.getValue() || "";
+    } catch {
+      return "";
+    }
+  }
+
+  return "";
+}
+
+function extractFromAceApi() {
+  const aceRoot = document.querySelector(".ace_editor");
+  if (!aceRoot || !window.ace || typeof window.ace.edit !== "function") {
+    return "";
+  }
+
+  try {
+    const editor = window.ace.edit(aceRoot);
+    if (editor && typeof editor.getValue === "function") {
+      return editor.getValue() || "";
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
 function extractFromMonaco() {
+  const apiValue = extractFromMonacoApi();
+  if (apiValue) {
+    return apiValue;
+  }
+
   const lineNodes = document.querySelectorAll(".monaco-editor .view-lines .view-line, .view-lines .view-line");
   if (!lineNodes.length) {
     return "";
   }
   return Array.from(lineNodes)
     .map((node) => node.textContent || "")
-    .join("\n")
-    .trim();
+    .join("\n");
 }
 
 function extractFromCodeMirror() {
+  const apiValue = extractFromCodeMirrorApi();
+  if (apiValue) {
+    return apiValue;
+  }
+
   const cmLines = document.querySelectorAll(".cm-editor .cm-line, .cm-content .cm-line, .CodeMirror-code pre");
   if (!cmLines.length) {
     return "";
   }
   return Array.from(cmLines)
     .map((line) => line.textContent || "")
-    .join("\n")
-    .trim();
+    .join("\n");
 }
 
 function extractFromAce() {
+  const apiValue = extractFromAceApi();
+  if (apiValue) {
+    return apiValue;
+  }
+
   const aceLines = document.querySelectorAll(".ace_line");
   if (!aceLines.length) {
     return "";
   }
   return Array.from(aceLines)
     .map((line) => line.textContent || "")
-    .join("\n")
-    .trim();
+    .join("\n");
 }
 
 function extractFromTextarea() {
@@ -465,20 +567,18 @@ function setCodeInAce(nextCode) {
 }
 
 function setCodeInMonaco(nextCode) {
-  const monacoApi = window.monaco?.editor;
-  if (!monacoApi) {
+  const editor = getMonacoFocusedEditor();
+  if (!editor) {
     return false;
   }
 
   try {
-    const editors = typeof monacoApi.getEditors === "function" ? monacoApi.getEditors() : [];
-    const targetEditor = editors && editors.length ? editors[0] : null;
-    if (targetEditor && typeof targetEditor.setValue === "function") {
-      targetEditor.setValue(nextCode);
+    if (typeof editor.setValue === "function") {
+      editor.setValue(nextCode);
       return true;
     }
 
-    const model = typeof monacoApi.getModels === "function" ? (monacoApi.getModels()[0] || null) : null;
+    const model = typeof editor.getModel === "function" ? editor.getModel() : null;
     if (model && typeof model.setValue === "function") {
       model.setValue(nextCode);
       return true;
@@ -507,52 +607,108 @@ function setCodeInEditor(nextCode) {
   return setCodeInTextarea(nextCode);
 }
 
+function normalizeQuickFixSuggestion(ruleId, suggestion) {
+  return {
+    ...(suggestion || {}),
+    rule_id: ruleId
+  };
+}
+
+function shouldQueryBackendForQuickFix(ruleId) {
+  if (!hasExtensionContext()) {
+    return { allowed: false, reason: "Extension context unavailable for backend fix request." };
+  }
+
+  const language = detectLanguageByUrl();
+  if (language !== "python") {
+    return { allowed: false, reason: `Backend quick-fix is disabled for ${language}.` };
+  }
+
+  const backendRules = new Set([
+    "python.loop.refactor",
+    "secrets.hardcoded",
+    "python.unsafe.dynamic-exec",
+    "security.warning",
+    "quality.review",
+    "quality.grade"
+  ]);
+
+  if (!backendRules.has(ruleId)) {
+    return { allowed: false, reason: "Rule is handled locally and does not require backend validation." };
+  }
+
+  return { allowed: true, reason: "Backend validation enabled." };
+}
+
+async function requestBackendQuickFix(code, ruleId, suggestion) {
+  const backendGate = shouldQueryBackendForQuickFix(ruleId);
+  if (!backendGate.allowed) {
+    return { ok: false, reason: backendGate.reason };
+  }
+
+  try {
+    const backendFix = await chrome.runtime.sendMessage({
+      type: "VALIDATE_QUICK_FIX",
+      payload: {
+        code,
+        language: detectLanguageByUrl(),
+        suggestion: normalizeQuickFixSuggestion(ruleId, suggestion)
+      }
+    });
+
+    if (!backendFix?.ok || !backendFix?.fixedCode) {
+      return {
+        ok: false,
+        reason: backendFix?.error || backendFix?.message || "Backend could not validate a safe fix for this suggestion."
+      };
+    }
+
+    if (backendFix.fixedCode === code) {
+      return { ok: false, reason: "Backend validated a fix but it produced no changes." };
+    }
+
+    return { ok: true, code: backendFix.fixedCode, source: "backend-validated" };
+  } catch {
+    return { ok: false, reason: "Backend fix service unavailable." };
+  }
+}
+
+function requestLocalQuickFix(code, ruleId, suggestion) {
+  const localCode = applyQuickFixToCode(code, ruleId, normalizeQuickFixSuggestion(ruleId, suggestion));
+  if (!localCode || localCode === code) {
+    return { ok: false, reason: "Local fallback could not produce a safe edit for this suggestion." };
+  }
+  return { ok: true, code: localCode, source: "local-fallback" };
+}
+
+function buildQuickFixFailure(primaryReason, fallbackReason) {
+  if (primaryReason && fallbackReason) {
+    return `${primaryReason} Local fallback also failed: ${fallbackReason}`;
+  }
+  return primaryReason || fallbackReason || "Quick fix could not be applied.";
+}
+
 async function applyQuickFix(ruleId, suggestion) {
   const original = extractCode();
   if (!original) {
     return { ok: false, error: "No code found in active editor." };
   }
 
-  let next = original;
-  let usedValidatedFix = false;
+  const backendResult = await requestBackendQuickFix(original, ruleId, suggestion);
+  let selectedResult = backendResult;
 
-  if (hasExtensionContext()) {
-    try {
-      const backendFix = await chrome.runtime.sendMessage({
-        type: "VALIDATE_QUICK_FIX",
-        payload: {
-          code: original,
-          language: detectLanguageByUrl(),
-          suggestion: {
-            ...(suggestion || {}),
-            rule_id: ruleId
-          }
-        }
-      });
-
-      if (backendFix?.ok && backendFix?.fixedCode) {
-        next = backendFix.fixedCode;
-        usedValidatedFix = true;
-      }
-    } catch {
-      // Fallback to local transform if backend is unreachable.
+  if (!backendResult.ok) {
+    const localResult = requestLocalQuickFix(original, ruleId, suggestion);
+    if (!localResult.ok) {
+      return {
+        ok: false,
+        error: buildQuickFixFailure(backendResult.reason, localResult.reason)
+      };
     }
+    selectedResult = localResult;
   }
 
-  if (!usedValidatedFix) {
-    next = applyQuickFixToCode(original, ruleId, suggestion);
-  }
-
-  if (next === original) {
-    return {
-      ok: false,
-      error: usedValidatedFix
-        ? "Validated fix produced no changes."
-        : "No applicable auto-fix for this suggestion in current code."
-    };
-  }
-
-  const wrote = setCodeInEditor(next);
+  const wrote = setCodeInEditor(selectedResult.code);
   if (!wrote) {
     return { ok: false, error: "Unable to apply quick fix in this editor." };
   }
@@ -560,7 +716,7 @@ async function applyQuickFix(ruleId, suggestion) {
   lastCode = "";
   const site = detectSite() || "broad-detection";
   publishSnapshot(site);
-  return { ok: true, source: usedValidatedFix ? "backend-validated" : "local-fallback" };
+  return { ok: true, source: selectedResult.source };
 }
 
 function ensureInlineStyles() {

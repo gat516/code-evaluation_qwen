@@ -24,11 +24,35 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _build_suggestions(grading_tool_output: dict) -> list[Suggestion]:
+def _build_suggestions(grading_tool_output: dict, execution: dict) -> list[Suggestion]:
     suggestions: list[Suggestion] = []
     grade = grading_tool_output.get("grade")
     explanation = grading_tool_output.get("explanation", "No explanation provided.")
     security_warning = bool(grading_tool_output.get("security_warning", False))
+
+    timed_out = bool(execution.get("timed_out", False))
+    exit_code = execution.get("exit_code")
+    stderr = str(execution.get("stderr") or "").strip()
+    execution_failed = timed_out or (exit_code is not None and exit_code != 0)
+
+    if execution_failed:
+      if timed_out:
+          runtime_reason = "Program timed out during execution."
+      elif stderr:
+          runtime_reason = stderr[-600:]
+      else:
+          runtime_reason = f"Program exited with non-zero status: {exit_code}."
+
+      suggestions.append(
+          Suggestion(
+              rule_id="correctness.runtime-error",
+              severity="high",
+              category="correctness",
+              message="Code does not run successfully; fix runtime errors before quality review.",
+              rationale=runtime_reason,
+              confidence=1.0,
+          )
+      )
 
     if security_warning:
         suggestions.append(
@@ -42,7 +66,7 @@ def _build_suggestions(grading_tool_output: dict) -> list[Suggestion]:
             )
         )
 
-    if isinstance(grade, int):
+    if isinstance(grade, int) and not execution_failed:
         if grade < 60:
             severity = "high"
         elif grade < 80:
@@ -96,89 +120,81 @@ def _replace_exact_block(code: str, before: str, replacement_lines: list[str]) -
     return code
 
 
+def _replace_exact_block_near_line(code: str, before: str, replacement_lines: list[str], line_number: int | None) -> str:
+    if not line_number or line_number < 1:
+        return _replace_exact_block(code, before, replacement_lines)
+
+    lines = code.splitlines()
+    before_lines = [line.strip() for line in before.splitlines() if line.strip()]
+    if not before_lines:
+        return code
+
+    span = len(before_lines)
+    target_idx = line_number - 1
+    best_idx = None
+    best_distance = None
+
+    for i in range(0, len(lines) - span + 1):
+        window = [line.strip() for line in lines[i : i + span]]
+        if window != before_lines:
+            continue
+        distance = abs(i - target_idx)
+        if best_idx is None or distance < best_distance:
+            best_idx = i
+            best_distance = distance
+
+    if best_idx is None:
+        return code
+
+    return "\n".join(lines[:best_idx] + replacement_lines + lines[best_idx + span :])
+
+
+def _line_index_from_anchor(suggestion: Suggestion, max_len: int) -> int | None:
+    line_number = suggestion.anchor.line if suggestion.anchor else None
+    if line_number is None:
+        return None
+    idx = line_number - 1
+    if idx < 0 or idx >= max_len:
+        return None
+    return idx
+
+
 def _apply_python_loop_fix(code: str, suggestion: Suggestion) -> str:
     before = (suggestion.before or "").strip()
     after = (suggestion.after or "").strip()
-    if before and after:
-        before_lines = [line.strip() for line in before.splitlines() if line.strip()]
-        ints: list[int] = []
-        for line in before_lines:
-            m = re.search(r"\(\s*(-?\d+)\s*\)", line)
-            if not m:
-                ints = []
-                break
-            ints.append(int(m.group(1)))
-        if ints and all(ints[i] == ints[i - 1] + 1 for i in range(1, len(ints))):
-            start_val = ints[0]
-            end_exclusive = ints[-1] + 1
-            replacement = [f"for i in range({start_val}, {end_exclusive}):", f"    {after}"]
-            replaced = _replace_exact_block(code, before, replacement)
-            if replaced != code:
-                return replaced
-
-    lines = code.splitlines()
-
-    def parse_numeric_call(line: str) -> tuple[str, int] | None:
-        m = re.match(r"^\s*([A-Za-z_][\w\.]*)\s*\(\s*(-?\d+)\s*\)\s*;?\s*$", line)
-        if not m:
-            return None
-        return m.group(1), int(m.group(2))
-
-    best: tuple[int, int, str, int, int] | None = None
-    start = -1
-    callee = ""
-    prev = 0
-
-    def flush(end_exclusive: int) -> None:
-        nonlocal best, start, callee, prev
-        if start == -1:
-            return
-        count = end_exclusive - start
-        if count >= 3:
-            start_info = parse_numeric_call(lines[start])
-            end_info = parse_numeric_call(lines[end_exclusive - 1])
-            if start_info and end_info:
-                candidate = (count, start, end_exclusive - 1, callee, start_info[1], end_info[1] + 1)
-                if best is None or candidate[0] > best[0]:
-                    best = candidate
-        start = -1
-        callee = ""
-        prev = 0
-
-    for i, line in enumerate(lines):
-        parsed = parse_numeric_call(line)
-        if parsed is None:
-            flush(i)
-            continue
-        current_callee, current_val = parsed
-        if start == -1:
-            start = i
-            callee = current_callee
-            prev = current_val
-            continue
-        if current_callee == callee and current_val == prev + 1:
-            prev = current_val
-            continue
-        flush(i)
-        start = i
-        callee = current_callee
-        prev = current_val
-
-    flush(len(lines))
-    if best is None:
+    if not before or not after:
         return code
 
-    _, run_start, run_end, run_callee, start_val, end_exclusive = best
-    replacement = [f"for i in range({start_val}, {end_exclusive}):", f"    {run_callee}(i)"]
-    return "\n".join(lines[:run_start] + replacement + lines[run_end + 1 :])
+    before_lines = [line.strip() for line in before.splitlines() if line.strip()]
+    ints: list[int] = []
+    for line in before_lines:
+        m = re.search(r"\(\s*(-?\d+)\s*\)", line)
+        if not m:
+            return code
+        ints.append(int(m.group(1)))
+
+    if not ints or not all(ints[i] == ints[i - 1] + 1 for i in range(1, len(ints))):
+        return code
+
+    start_val = ints[0]
+    end_exclusive = ints[-1] + 1
+    replacement = [f"for i in range({start_val}, {end_exclusive}):", f"    {after}"]
+    line_number = suggestion.anchor.line if suggestion.anchor else None
+    return _replace_exact_block_near_line(code, before, replacement, line_number)
 
 
-def _apply_python_secret_fix(code: str, _: Suggestion) -> str:
+def _apply_python_secret_fix(code: str, suggestion: Suggestion) -> str:
     lines = code.splitlines()
     secret_regex = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["\'][^"\']+["\']\s*$')
-    changed = False
+    changed_idx: int | None = None
 
-    for idx, line in enumerate(lines):
+    anchored_idx = _line_index_from_anchor(suggestion, len(lines))
+    candidate_indices = [anchored_idx] if anchored_idx is not None else list(range(len(lines)))
+    if anchored_idx is not None:
+        candidate_indices.extend([idx for idx in range(len(lines)) if idx != anchored_idx])
+
+    for idx in candidate_indices:
+        line = lines[idx]
         match = secret_regex.match(line)
         if not match:
             continue
@@ -189,9 +205,10 @@ def _apply_python_secret_fix(code: str, _: Suggestion) -> str:
         indent = re.match(r"^\s*", line).group(0)
         env_key = re.sub(r"[^A-Z0-9_]", "_", var_name.upper())
         lines[idx] = f'{indent}{var_name} = os.getenv("{env_key}", "")'
-        changed = True
+        changed_idx = idx
+        break
 
-    if not changed:
+    if changed_idx is None:
         return code
 
     next_code = "\n".join(lines)
@@ -200,16 +217,25 @@ def _apply_python_secret_fix(code: str, _: Suggestion) -> str:
     return next_code
 
 
-def _apply_python_eval_exec_fix(code: str, _: Suggestion) -> str:
+def _apply_python_eval_exec_fix(code: str, suggestion: Suggestion) -> str:
     lines = code.splitlines()
-    changed = False
-    for idx, line in enumerate(lines):
+    changed_idx: int | None = None
+
+    anchored_idx = _line_index_from_anchor(suggestion, len(lines))
+    candidate_indices = [anchored_idx] if anchored_idx is not None else list(range(len(lines)))
+    if anchored_idx is not None:
+        candidate_indices.extend([idx for idx in range(len(lines)) if idx != anchored_idx])
+
+    for idx in candidate_indices:
+        line = lines[idx]
         patched = re.sub(r"\beval\(([^\n\)]*)\)", r"ast.literal_eval(\1)", line)
         patched = re.sub(r"\bexec\(([^\n\)]*)\)", r"# exec removed for safety: \1", patched)
         if patched != line:
             lines[idx] = patched
-            changed = True
-    if not changed:
+            changed_idx = idx
+            break
+
+    if changed_idx is None:
         return code
 
     next_code = "\n".join(lines)
@@ -290,7 +316,7 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
     return AnalyzeResponse(
         execution=result["execution"],
         grading_tool_output=result["grading_tool_output"],
-        suggestions=_build_suggestions(result["grading_tool_output"]),
+        suggestions=_build_suggestions(result["grading_tool_output"], result["execution"]),
     )
 
 
