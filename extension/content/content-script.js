@@ -36,7 +36,7 @@ function detectLanguageByUrl() {
 }
 
 function extractFromMonaco() {
-  const lineNodes = document.querySelectorAll(".view-lines .view-line");
+  const lineNodes = document.querySelectorAll(".monaco-editor .view-lines .view-line, .view-lines .view-line");
   if (!lineNodes.length) {
     return "";
   }
@@ -47,7 +47,7 @@ function extractFromMonaco() {
 }
 
 function extractFromCodeMirror() {
-  const cmLines = document.querySelectorAll(".CodeMirror-code pre");
+  const cmLines = document.querySelectorAll(".cm-editor .cm-line, .cm-content .cm-line, .CodeMirror-code pre");
   if (!cmLines.length) {
     return "";
   }
@@ -224,13 +224,13 @@ function renderInlineSuggestions(result) {
     return;
   }
 
-  const monacoLines = Array.from(document.querySelectorAll(".view-lines .view-line"));
+  const monacoLines = Array.from(document.querySelectorAll(".monaco-editor .view-lines .view-line, .view-lines .view-line"));
   if (monacoLines.length) {
     applyHighlightsToLineNodes(monacoLines, suggestions);
     return;
   }
 
-  const codeMirrorLines = Array.from(document.querySelectorAll(".CodeMirror-code pre"));
+  const codeMirrorLines = Array.from(document.querySelectorAll(".cm-editor .cm-line, .cm-content .cm-line, .CodeMirror-code pre"));
   if (codeMirrorLines.length) {
     applyHighlightsToLineNodes(codeMirrorLines, suggestions);
     return;
