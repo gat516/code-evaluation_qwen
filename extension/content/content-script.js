@@ -17,6 +17,9 @@ const INLINE_CARD_ID = "cc-inline-card";
 const HIGHLIGHT_CLASS = "cc-inline-highlight";
 
 let latestResult = null;
+let activeSuggestionByKey = new Map();
+let hoverHandlersAttached = false;
+let currentCardSuggestion = null;
 
 function detectSite() {
   const host = window.location.hostname;
@@ -113,6 +116,7 @@ function ensureInlineStyles() {
       font-size: 12px;
       line-height: 1.35;
       display: none;
+      pointer-events: auto;
     }
     #${INLINE_CARD_ID}.cc-medium {
       border-color: #fdba74;
@@ -129,6 +133,18 @@ function ensureInlineStyles() {
     }
     #${INLINE_CARD_ID} .cc-rationale {
       color: #334155;
+    }
+    #${INLINE_CARD_ID} .cc-actions {
+      margin-top: 8px;
+    }
+    #${INLINE_CARD_ID} button {
+      border: 1px solid #0f766e;
+      background: #0f766e;
+      color: #ffffff;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 11px;
+      cursor: pointer;
     }
   `;
   document.head.appendChild(style);
@@ -148,12 +164,17 @@ function getOrCreateInlineCard() {
 function showInlineCard(suggestion, rect) {
   const card = getOrCreateInlineCard();
   const sevClass = suggestion.severity === "high" ? "cc-high" : suggestion.severity === "medium" ? "cc-medium" : "cc-low";
+  currentCardSuggestion = suggestion;
+
+  const hasFix = !!(suggestion.after && String(suggestion.after).trim());
+  const actionText = hasFix ? "Copy suggested fix" : "Copy suggestion details";
 
   card.className = sevClass;
   card.innerHTML = `
     <strong>${suggestion.message}</strong>
     <div><em>${suggestion.category} | ${suggestion.severity}</em></div>
     <div class="cc-rationale">${suggestion.rationale}</div>
+    <div class="cc-actions"><button type="button" data-cc-action="copy-fix">${actionText}</button></div>
   `;
 
   const left = Math.min(window.innerWidth - 340, rect.left + 8);
@@ -169,13 +190,15 @@ function hideInlineCard() {
   if (card) {
     card.style.display = "none";
   }
+  currentCardSuggestion = null;
 }
 
 function clearInlineHighlights() {
   document.querySelectorAll(`.${HIGHLIGHT_CLASS}`).forEach((el) => {
     el.classList.remove(HIGHLIGHT_CLASS, "cc-high", "cc-medium", "cc-low");
-    el.removeAttribute("data-cc-suggestion");
+    el.removeAttribute("data-cc-key");
   });
+  activeSuggestionByKey = new Map();
   hideInlineCard();
 }
 
@@ -183,14 +206,8 @@ function getSeverityClass(suggestion) {
   return suggestion.severity === "high" ? "cc-high" : suggestion.severity === "medium" ? "cc-medium" : "cc-low";
 }
 
-function bindHighlightInteraction(el, suggestion) {
-  el.addEventListener("mouseenter", () => {
-    const rect = el.getBoundingClientRect();
-    showInlineCard(suggestion, rect);
-  });
-  el.addEventListener("mouseleave", () => {
-    hideInlineCard();
-  });
+function getSuggestionKey(suggestion, lineNumber) {
+  return `${suggestion.rule_id || suggestion.message || "rule"}:${lineNumber}`;
 }
 
 function applyHighlightsToLineNodes(lineNodes, suggestions) {
@@ -209,14 +226,64 @@ function applyHighlightsToLineNodes(lineNodes, suggestions) {
       return;
     }
 
+    const key = getSuggestionKey(suggestion, lineNumber);
+    activeSuggestionByKey.set(key, suggestion);
     lineNode.classList.add(HIGHLIGHT_CLASS, getSeverityClass(suggestion));
-    lineNode.dataset.ccSuggestion = suggestion.message;
-    bindHighlightInteraction(lineNode, suggestion);
+    lineNode.dataset.ccKey = key;
+  });
+}
+
+function attachHoverHandlers() {
+  if (hoverHandlersAttached) {
+    return;
+  }
+  hoverHandlersAttached = true;
+
+  document.addEventListener("mousemove", (event) => {
+    const target = event.target?.closest?.(`.${HIGHLIGHT_CLASS}`);
+    if (!target) {
+      hideInlineCard();
+      return;
+    }
+
+    const key = target.dataset.ccKey;
+    if (!key) {
+      hideInlineCard();
+      return;
+    }
+
+    const suggestion = activeSuggestionByKey.get(key);
+    if (!suggestion) {
+      hideInlineCard();
+      return;
+    }
+
+    const rect = target.getBoundingClientRect();
+    showInlineCard(suggestion, rect);
+  });
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target?.closest?.("#cc-inline-card [data-cc-action='copy-fix']");
+    if (!button || !currentCardSuggestion) {
+      return;
+    }
+
+    const fixPayload = currentCardSuggestion.after || `${currentCardSuggestion.message}\n\n${currentCardSuggestion.rationale}`;
+    try {
+      await navigator.clipboard.writeText(fixPayload);
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = currentCardSuggestion?.after ? "Copy suggested fix" : "Copy suggestion details";
+      }, 1000);
+    } catch {
+      button.textContent = "Copy failed";
+    }
   });
 }
 
 function renderInlineSuggestions(result) {
   ensureInlineStyles();
+  attachHoverHandlers();
   clearInlineHighlights();
 
   const suggestions = result?.suggestions || [];
@@ -244,8 +311,10 @@ function renderInlineSuggestions(result) {
 
   const textarea = document.querySelector("textarea");
   if (textarea) {
+    const key = getSuggestionKey(suggestions[0], suggestions[0]?.anchor?.line || 1);
+    activeSuggestionByKey.set(key, suggestions[0]);
     textarea.classList.add(HIGHLIGHT_CLASS, "cc-medium");
-    bindHighlightInteraction(textarea, suggestions[0]);
+    textarea.dataset.ccKey = key;
   }
 }
 
