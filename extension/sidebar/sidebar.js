@@ -261,10 +261,14 @@ async function refreshState() {
 async function requestManualAnalyze() {
   const tabId = await getActiveTabId();
   if (!tabId) {
+    setFeedback("No active tab.");
     return;
   }
   clearPreview();
-  await chrome.runtime.sendMessage({ type: "MANUAL_ANALYZE", tabId });
+  const response = await chrome.runtime.sendMessage({ type: "MANUAL_ANALYZE", tabId });
+  if (!response?.ok) {
+    setFeedback(response?.error || "Unable to trigger analysis.");
+  }
   await refreshState();
 }
 

@@ -1552,6 +1552,12 @@ if (hasExtensionContext()) {
         .catch((error) => sendResponse({ ok: false, error: String(error?.message || error || "Quick fix failed") }));
       return true;
     }
+    if (message?.type === "REQUEST_SNAPSHOT_AND_ANALYZE") {
+      const site = detectSite() || "broad-detection";
+      publishSnapshot(site, true);
+      sendResponse({ ok: true });
+      return true;
+    }
   });
 }
 

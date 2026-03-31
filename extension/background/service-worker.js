@@ -669,7 +669,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       analyzeSnapshot(requestedTabId, state.snapshot).then(() => sendResponse({ ok: true }));
       return true;
     }
-    sendResponse({ ok: false, error: "No code snapshot available yet." });
+    // Ask content script to publish a fresh snapshot when sidebar refresh is clicked early.
+    chrome.tabs.sendMessage(requestedTabId, { type: "REQUEST_SNAPSHOT_AND_ANALYZE" })
+      .then((response) => {
+        if (response?.ok) {
+          sendResponse({ ok: true, requestedSnapshot: true });
+          return;
+        }
+        sendResponse({ ok: false, error: response?.error || "No code snapshot available yet." });
+      })
+      .catch(() => {
+        sendResponse({ ok: false, error: "No code snapshot available yet. Open a supported editor tab first." });
+      });
     return true;
   }
 

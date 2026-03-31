@@ -610,6 +610,13 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
 
         suggestions = _hydrate_prefetched_fixes(payload.code, suggestions, payload.exec_timeout_s)
 
+        # If model suggestions were not fix-valid after hydration, enforce deterministic
+        # repeated-print fallback so maintainability loop refactors still surface.
+        if not suggestions:
+            repeated_print = _build_repetition_suggestion(payload.code)
+            if repeated_print:
+                suggestions = _hydrate_prefetched_fixes(payload.code, [repeated_print], payload.exec_timeout_s)
+
         metadata["llm_raw_empty"] = not bool(content.strip())
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -638,12 +645,20 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
     metadata["execution"] = fallback_result.get("execution", {})
     metadata["grading_tool_output"] = fallback_result.get("grading_tool_output", {})
 
+    fallback_suggestions = _build_suggestions(
+        fallback_result["grading_tool_output"],
+        fallback_result["execution"],
+        payload.code,
+    )
+    fallback_suggestions = _hydrate_prefetched_fixes(payload.code, fallback_suggestions, payload.exec_timeout_s)
+
+    if not fallback_suggestions:
+        repeated_print = _build_repetition_suggestion(payload.code)
+        if repeated_print:
+            fallback_suggestions = _hydrate_prefetched_fixes(payload.code, [repeated_print], payload.exec_timeout_s)
+
     return AnalyzeResponse(
-        suggestions=_build_suggestions(
-            fallback_result["grading_tool_output"],
-            fallback_result["execution"],
-            payload.code,
-        ),
+        suggestions=fallback_suggestions,
         model="grading-core-fallback",
         analysis_time_ms=max(0, elapsed_ms),
         metadata=metadata,

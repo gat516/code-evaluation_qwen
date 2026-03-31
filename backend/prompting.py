@@ -7,19 +7,19 @@ from typing import Any
 SCHEMA_EXAMPLE = {
     "suggestions": [
         {
-            "line": 2,
-            "col": 11,
-            "end_line": 2,
-            "end_col": 15,
+            "line": 3,
+            "col": 4,
+            "end_line": 3,
+            "end_col": 22,
             "severity": "error",
-            "message": "NameError: 'none' should be 'None' (Python is case-sensitive)",
+            "message": "Potential IndexError: loop upper bound can exceed list length.",
             "fix": {
-                "replacement": "None",
+                "replacement": "for i in range(min(k, len(nums))):",
                 "range": {
-                    "startLine": 2,
-                    "startCol": 11,
-                    "endLine": 2,
-                    "endCol": 15,
+                    "startLine": 3,
+                    "startCol": 4,
+                    "endLine": 3,
+                    "endCol": 22,
                 },
             },
             "source": "ai",
@@ -37,7 +37,8 @@ def build_analysis_messages(code: str, language: str, site: str | None, metadata
         "You are a strict static analysis assistant for coding interview solutions. "
         "Return valid JSON only, with no markdown fences and no explanations outside JSON. "
         "Focus on correctness and high-signal Python issues first. "
-        "Only emit suggestions that include an actionable concrete fix."
+        "Only emit suggestions that include an actionable concrete fix. "
+        "Do not output advisory comments without an actual replacement patch."
     )
 
     user_prompt = (
@@ -47,7 +48,14 @@ def build_analysis_messages(code: str, language: str, site: str | None, metadata
         "line, col, end_line, end_col, severity(error|warning|info), message, "
         "fix{replacement, range{startLine,startCol,endLine,endCol}}, source='ai'.\n"
         "Keep fixes minimal and syntactically valid. Prefer replacing the smallest correct range.\n"
-        "Return at most 3 suggestions, sorted by impact.\n"
+        "Each suggestion must target a specific section that can be replaced directly.\n"
+        "Cover high-value bug classes when present: syntax/parsing issues, bounds checks, off-by-one errors, "
+        "wrong return value/variable/type conversion, missing None checks, incorrect branch conditions, "
+        "and unsafe operations.\n"
+        "Important maintainability rule: detect repeated contiguous statements (especially repeated print calls) "
+        "and suggest replacing the whole repeated section with a loop.\n"
+        "When suggesting a loop refactor, set range start/end to cover the entire repeated block.\n"
+        "Return at most 5 suggestions, sorted by impact.\n"
         "If there are no issues with actionable fixes, return {'suggestions': []}.\n\n"
         f"Metadata:\n{metadata_text}\n\n"
         f"Example JSON format:\n{schema_text}\n\n"
