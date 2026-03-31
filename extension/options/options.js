@@ -1,5 +1,5 @@
 const defaults = {
-  analysisMode: "local",
+  analysisMode: "ai",
   backendUrl: "http://127.0.0.1:8000",
   apiKey: "",
   broadDetection: false,

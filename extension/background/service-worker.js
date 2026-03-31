@@ -14,7 +14,7 @@ function hashKey(input) {
 
 async function getSettings() {
   const defaults = {
-    analysisMode: "local",
+    analysisMode: "ai",
     backendUrl: "http://127.0.0.1:8000",
     apiKey: "",
     broadDetection: false,
@@ -37,6 +37,79 @@ function buildSuggestion({ ruleId, severity, category, message, rationale, befor
   };
 }
 
+function detectSequentialCallRuns(lines) {
+  const runs = [];
+
+  const parse = (line) => {
+    const match = String(line || "").match(/^\s*([A-Za-z_][\w\.]*)\s*\(\s*(-?\d+)\s*\)\s*;?\s*$/);
+    if (!match) {
+      return null;
+    }
+    return {
+      callee: match[1],
+      value: Number(match[2])
+    };
+  };
+
+  let start = -1;
+  let callee = "";
+  let prevValue = 0;
+
+  const flushRun = (endIndexExclusive) => {
+    if (start === -1) {
+      return;
+    }
+    const count = endIndexExclusive - start;
+    if (count >= 3) {
+      const startValue = parse(lines[start])?.value;
+      const endValue = parse(lines[endIndexExclusive - 1])?.value;
+      if (Number.isInteger(startValue) && Number.isInteger(endValue)) {
+        runs.push({
+          start,
+          end: endIndexExclusive - 1,
+          count,
+          callee,
+          startValue,
+          endExclusive: endValue + 1
+        });
+      }
+    }
+    start = -1;
+    callee = "";
+    prevValue = 0;
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const parsed = parse(lines[i]);
+    if (!parsed) {
+      flushRun(i);
+      continue;
+    }
+
+    if (start === -1) {
+      start = i;
+      callee = parsed.callee;
+      prevValue = parsed.value;
+      continue;
+    }
+
+    const expected = prevValue + 1;
+    const samePattern = parsed.callee === callee && parsed.value === expected;
+    if (!samePattern) {
+      flushRun(i);
+      start = i;
+      callee = parsed.callee;
+      prevValue = parsed.value;
+      continue;
+    }
+
+    prevValue = parsed.value;
+  }
+
+  flushRun(lines.length);
+  return runs;
+}
+
 function withAnchor(suggestion, lineNumber) {
   return {
     ...suggestion,
@@ -47,20 +120,23 @@ function withAnchor(suggestion, lineNumber) {
 function analyzePython(code) {
   const suggestions = [];
   const lines = code.split("\n");
-  const printOnly = lines.filter((line) => line.trim().startsWith("print("));
-  const repeatedPrintLine = lines.findIndex((line) => line.trim().startsWith("print(")) + 1;
-
-  if (printOnly.length >= 5) {
+  const sequentialRuns = detectSequentialCallRuns(lines);
+  if (sequentialRuns.length) {
+    const run = sequentialRuns.sort((a, b) => b.count - a.count)[0];
+    const before = lines.slice(run.start, run.end + 1).join("\n");
+    const after = `${run.callee}(i)`;
     suggestions.push(withAnchor(
       buildSuggestion({
         ruleId: "python.loop.refactor",
         severity: "medium",
         category: "maintainability",
-        message: "Repeated print statements could be replaced with a loop.",
-        rationale: "Repeated sequential statements make the code harder to maintain and update.",
+        message: "Repeated sequential calls could be replaced with a loop.",
+        rationale: "Repeated incremental statements make the code harder to maintain and update.",
+        before,
+        after,
         confidence: 0.86
       }),
-      repeatedPrintLine
+      run.start + 1
     ));
   }
 
@@ -221,6 +297,28 @@ function ensureAnchors(suggestions, code) {
   });
 }
 
+function mergeSuggestions(preferred, fallback) {
+  const merged = [];
+  const seen = new Set();
+
+  function add(item) {
+    if (!item || item.rule_id === "info.no-issues") {
+      return;
+    }
+    const key = `${item.rule_id}|${item.anchor?.line || 0}|${item.message || ""}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    merged.push(item);
+  }
+
+  (preferred || []).forEach(add);
+  (fallback || []).forEach(add);
+
+  return merged;
+}
+
 async function analyzeCodeWithBackend(snapshot, settings) {
   const headers = {
     "Content-Type": "application/json"
@@ -264,6 +362,35 @@ async function analyzeCodeWithBackend(snapshot, settings) {
   return normalized;
 }
 
+async function requestValidatedFix(payload, settings) {
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  if (settings.apiKey) {
+    headers["X-API-Key"] = settings.apiKey;
+  }
+
+  const response = await fetch(`${settings.backendUrl}/fix`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      code: payload.code,
+      language: payload.language || "python",
+      suggestion: payload.suggestion,
+      exec_timeout_s: 2
+    })
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const msg = body?.detail?.message || body?.detail?.error || `Backend returned ${response.status}`;
+    throw new Error(msg);
+  }
+
+  return response.json();
+}
+
 async function setBadge(tabId, isSupported) {
   if (!tabId) {
     return;
@@ -279,6 +406,7 @@ async function setBadge(tabId, isSupported) {
 }
 
 async function analyzeSnapshot(tabId, snapshot) {
+  const frameId = snapshot.__frameId;
   const settings = await getSettings();
   const mode = settings.analysisMode || "local";
   const cacheKey = hashKey(`${mode}|${settings.backendUrl || ""}|${snapshot.language}|${snapshot.site}|${snapshot.code}`);
@@ -291,7 +419,12 @@ async function analyzeSnapshot(tabId, snapshot) {
       result: cached,
       updatedAt: Date.now()
     });
-    chrome.tabs.sendMessage(tabId, { type: "ANALYSIS_RESULT", payload: cached }).catch(() => {});
+    const msg = { type: "ANALYSIS_RESULT", payload: cached };
+    if (Number.isInteger(frameId) && frameId >= 0) {
+      chrome.tabs.sendMessage(tabId, msg, { frameId }).catch(() => {});
+    }
+    // Also broadcast without frame targeting so whichever frame hosts the editor can render inline suggestions.
+    chrome.tabs.sendMessage(tabId, msg).catch(() => {});
     return;
   }
 
@@ -302,10 +435,41 @@ async function analyzeSnapshot(tabId, snapshot) {
   });
 
   try {
-    const result = mode === "ai"
-      ? await analyzeCodeWithBackend(snapshot, settings)
-      : analyzeCodeLocally(snapshot);
-    cache.set(cacheKey, result);
+    let result;
+    let shouldCache = true;
+    if (mode === "ai") {
+      const localResult = analyzeCodeLocally(snapshot);
+      try {
+        const aiResult = await analyzeCodeWithBackend(snapshot, settings);
+        result = {
+          ...aiResult,
+          suggestions: mergeSuggestions(aiResult.suggestions || [], localResult.suggestions || []),
+          metadata: {
+            ...(aiResult.metadata || {}),
+            local_rules_merged: true,
+            fallback_mode: false
+          }
+        };
+      } catch (aiError) {
+        shouldCache = false;
+        result = {
+          ...localResult,
+          metadata: {
+            ...(localResult.metadata || {}),
+            analyzer: "local-rules",
+            mode: "local-fallback",
+            fallback_mode: true,
+            fallback_warning: "AI backend unavailable. Running local analysis.",
+            fallback_reason: String(aiError?.message || aiError || "AI backend unavailable")
+          }
+        };
+      }
+    } else {
+      result = analyzeCodeLocally(snapshot);
+    }
+    if (shouldCache) {
+      cache.set(cacheKey, result);
+    }
 
     tabState.set(tabId, {
       ...tabState.get(tabId),
@@ -313,7 +477,12 @@ async function analyzeSnapshot(tabId, snapshot) {
       result,
       updatedAt: Date.now()
     });
-    chrome.tabs.sendMessage(tabId, { type: "ANALYSIS_RESULT", payload: result }).catch(() => {});
+    const msg = { type: "ANALYSIS_RESULT", payload: result };
+    if (Number.isInteger(frameId) && frameId >= 0) {
+      chrome.tabs.sendMessage(tabId, msg, { frameId }).catch(() => {});
+    }
+    // Also broadcast without frame targeting so whichever frame hosts the editor can render inline suggestions.
+    chrome.tabs.sendMessage(tabId, msg).catch(() => {});
   } catch (error) {
     tabState.set(tabId, {
       ...tabState.get(tabId),
@@ -321,7 +490,11 @@ async function analyzeSnapshot(tabId, snapshot) {
       error: String(error.message || error),
       updatedAt: Date.now()
     });
-    chrome.tabs.sendMessage(tabId, { type: "ANALYSIS_ERROR", payload: { error: String(error.message || error) } }).catch(() => {});
+    const msg = { type: "ANALYSIS_ERROR", payload: { error: String(error.message || error) } };
+    if (Number.isInteger(frameId) && frameId >= 0) {
+      chrome.tabs.sendMessage(tabId, msg, { frameId }).catch(() => {});
+    }
+    chrome.tabs.sendMessage(tabId, msg).catch(() => {});
   }
 }
 
@@ -339,6 +512,7 @@ function scheduleAnalyze(tabId, snapshot) {
     ...current,
     status: "collecting",
     snapshot,
+    frameId: snapshot.__frameId,
     timerId,
     updatedAt: Date.now()
   });
@@ -365,18 +539,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "CODE_SNAPSHOT" && tabId) {
+    const payload = {
+      ...message.payload,
+      __frameId: sender.frameId
+    };
     getSettings().then((settings) => {
       if (!settings.autoAnalyze) {
         tabState.set(tabId, {
           ...(tabState.get(tabId) || {}),
           status: "stale",
-          snapshot: message.payload,
+          snapshot: payload,
+          frameId: sender.frameId,
           updatedAt: Date.now()
         });
         sendResponse({ ok: true, skipped: true });
         return;
       }
-      scheduleAnalyze(tabId, message.payload);
+      scheduleAnalyze(tabId, payload);
       sendResponse({ ok: true });
     });
     return true;
@@ -388,6 +567,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "GET_LATEST_RESULT" && tabId) {
+    const state = tabState.get(tabId) || null;
+    sendResponse({ result: state?.result || null, status: state?.status || "idle" });
+    return true;
+  }
+
   if (message?.type === "MANUAL_ANALYZE") {
     const requestedTabId = message.tabId;
     const state = tabState.get(requestedTabId);
@@ -396,6 +581,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
     sendResponse({ ok: false, error: "No code snapshot available yet." });
+    return true;
+  }
+
+  if (message?.type === "VALIDATE_QUICK_FIX") {
+    getSettings()
+      .then((settings) => requestValidatedFix(message.payload || {}, settings))
+      .then((result) => {
+        sendResponse({
+          ok: !!result?.applied,
+          fixedCode: result?.fixed_code || null,
+          message: result?.message || "",
+          validation: result?.validation || {}
+        });
+      })
+      .catch((error) => {
+        sendResponse({ ok: false, error: String(error?.message || error || "Fix validation failed") });
+      });
     return true;
   }
 

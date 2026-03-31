@@ -32,6 +32,7 @@
         "https://www.hackerrank.com/*"
       ],
       "js": ["content/content-script.js"],
+      "all_frames": true,
       "run_at": "document_idle"
     }
   ]

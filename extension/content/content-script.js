@@ -21,10 +21,54 @@ let activeSuggestionByKey = new Map();
 let hoverHandlersAttached = false;
 let currentCardSuggestion = null;
 
+function hasExtensionContext() {
+  return !!(globalThis.chrome && chrome.runtime && chrome.runtime.id);
+}
+
+async function safeStorageGet(defaults) {
+  if (!hasExtensionContext()) {
+    return defaults;
+  }
+  try {
+    return await chrome.storage.sync.get(defaults);
+  } catch {
+    return defaults;
+  }
+}
+
+function safeSendMessage(payload) {
+  if (!hasExtensionContext()) {
+    return;
+  }
+  try {
+    const maybePromise = chrome.runtime.sendMessage(payload);
+    if (maybePromise && typeof maybePromise.catch === "function") {
+      maybePromise.catch(() => {});
+    }
+  } catch {
+    // Ignore stale content script after extension reload.
+  }
+}
+
 function detectSite() {
   const host = window.location.hostname;
   const matched = ALLOWLIST.find((site) => site.hostIncludes.some((frag) => host.includes(frag)));
   return matched ? matched.name : null;
+}
+
+async function requestLatestResultAndRender() {
+  if (!hasExtensionContext()) {
+    return;
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_LATEST_RESULT" });
+    if (response?.result) {
+      latestResult = response.result;
+      renderInlineSuggestions(latestResult);
+    }
+  } catch {
+    // Ignore invalidated extension context for stale content scripts.
+  }
 }
 
 function detectLanguageByUrl() {
@@ -80,8 +124,443 @@ function extractFromTextarea() {
   return ranked[0]?.el?.value?.trim() || "";
 }
 
+function getPrimaryTextarea() {
+  const textareas = Array.from(document.querySelectorAll("textarea"));
+  if (!textareas.length) {
+    return null;
+  }
+
+  const ranked = textareas
+    .map((ta) => ({ el: ta, len: (ta.value || "").length }))
+    .sort((a, b) => b.len - a.len);
+
+  return ranked[0]?.el || null;
+}
+
 function extractCode() {
   return extractFromMonaco() || extractFromCodeMirror() || extractFromAce() || extractFromTextarea();
+}
+
+function getClampedLineIndex(lines, lineNumber) {
+  const idx = Number(lineNumber) - 1;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= lines.length) {
+    return -1;
+  }
+  return idx;
+}
+
+function applyBeforeAfterSnippet(code, suggestion) {
+  const before = String(suggestion?.before || "").trim();
+  const after = String(suggestion?.after || "").trim();
+  if (!before || !after) {
+    return code;
+  }
+
+  const lines = code.split("\n");
+  const beforeLines = before.split("\n").map((line) => line.trim());
+  const beforeCount = beforeLines.length;
+  if (!beforeCount) {
+    return code;
+  }
+
+  for (let i = 0; i <= lines.length - beforeCount; i += 1) {
+    let matches = true;
+    for (let j = 0; j < beforeCount; j += 1) {
+      if (String(lines[i + j] || "").trim() !== beforeLines[j]) {
+        matches = false;
+        break;
+      }
+    }
+
+    if (!matches) {
+      continue;
+    }
+
+    const parsedInts = beforeLines
+      .map((line) => line.match(/\(\s*(-?\d+)\s*\)/))
+      .filter(Boolean)
+      .map((m) => Number(m[1]));
+    const isSequential = parsedInts.length === beforeCount
+      && parsedInts.every((v, idx) => idx === 0 || v === parsedInts[idx - 1] + 1);
+
+    if (!isSequential) {
+      continue;
+    }
+
+    const startValue = parsedInts[0];
+    const endExclusive = parsedInts[parsedInts.length - 1] + 1;
+    const replacement = [`for i in range(${startValue}, ${endExclusive}):`, `    ${after}`];
+
+    return [
+      ...lines.slice(0, i),
+      ...replacement,
+      ...lines.slice(i + beforeCount)
+    ].join("\n");
+  }
+
+  return code;
+}
+
+function applyPythonLoopRefactor(code, lineNumber) {
+  // Keep a robust fallback path for legacy suggestions without before/after payloads.
+  const lines = code.split("\n");
+  const idx = getClampedLineIndex(lines, lineNumber);
+
+  // Normalize hidden editor glyphs so pattern checks stay reliable.
+  const normalizeLine = (val) => String(val || "").replace(/[\u200b\u200c\u200d\ufeff]/g, "").replace(/\u00a0/g, " ");
+  const numericPrintValue = (val) => {
+    const match = normalizeLine(val).match(/^\s*print\s*\(\s*(-?\d+)\s*\)\s*;?\s*$/);
+    return match ? Number(match[1]) : null;
+  };
+  const isNumericPrintLine = (val) => numericPrintValue(val) !== null;
+
+  const runs = [];
+  let start = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (isNumericPrintLine(lines[i])) {
+      if (start === -1) {
+        start = i;
+      }
+    } else if (start !== -1) {
+      runs.push({ start, end: i - 1, count: i - start });
+      start = -1;
+    }
+  }
+  if (start !== -1) {
+    runs.push({ start, end: lines.length - 1, count: lines.length - start });
+  }
+
+  const eligibleRuns = runs.filter((run) => run.count >= 2);
+  if (!eligibleRuns.length) {
+    return code;
+  }
+
+  const anchoredRun = Number.isInteger(idx)
+    ? eligibleRuns.find((run) => idx >= run.start && idx <= run.end)
+    : null;
+
+  const targetRun = anchoredRun || eligibleRuns.sort((a, b) => b.count - a.count)[0];
+  if (!targetRun) {
+    return code;
+  }
+
+  const values = lines.slice(targetRun.start, targetRun.end + 1).map((line) => numericPrintValue(line));
+  if (values.some((v) => v === null)) {
+    return code;
+  }
+
+  // Only refactor clean +1 numeric sequences (e.g. print(1)..print(6)).
+  for (let i = 1; i < values.length; i += 1) {
+    if (values[i] !== values[i - 1] + 1) {
+      return code;
+    }
+  }
+
+  const startValue = values[0];
+  const endExclusive = values[values.length - 1] + 1;
+
+  const before = lines.slice(0, targetRun.start);
+  const after = lines.slice(targetRun.end + 1);
+  const replacement = [`for i in range(${startValue}, ${endExclusive}):`, "    print(i)"];
+
+  const nextLine = normalizeLine(after[0] || "");
+  const nextIndented = normalizeLine(after[1] || "");
+  const sameLoopRegex = new RegExp(`^\\s*for\\s+i\\s+in\\s+range\\s*\\(\\s*${startValue}\\s*,\\s*${endExclusive}\\s*\\)\\s*:\\s*$`);
+  const duplicateFollowingLoop = sameLoopRegex.test(nextLine) && /^\s*print\s*\(\s*i\s*\)\s*$/.test(nextIndented);
+
+  const finalAfter = duplicateFollowingLoop ? after.slice(2) : after;
+  return [...before, ...replacement, ...finalAfter].join("\n");
+}
+
+function applySecretFix(code, lineNumber) {
+  const lines = code.split("\n");
+  const idx = getClampedLineIndex(lines, lineNumber);
+  if (idx === -1) {
+    return code;
+  }
+
+  const line = lines[idx];
+  const match = line.match(/^\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*=.*$/);
+  if (!match) {
+    return code;
+  }
+
+  const varNameRaw = match[1];
+  const varName = varNameRaw.replace(/-/g, "_");
+  const keyName = varName.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+  const indent = (line.match(/^\s*/) || [""])[0];
+  lines[idx] = `${indent}${varName} = os.getenv("${keyName}", "")`;
+
+  let next = lines.join("\n");
+  const hasImportOs = /^\s*import\s+os\s*$/m.test(next);
+  if (!hasImportOs) {
+    next = `import os\n${next}`;
+  }
+  return next;
+}
+
+function applyDynamicExecFix(code, lineNumber) {
+  const lines = code.split("\n");
+  const idx = getClampedLineIndex(lines, lineNumber);
+  if (idx === -1) {
+    return code;
+  }
+
+  const originalLine = lines[idx];
+  let patchedLine = originalLine.replace(/\beval\(([^\n\)]*)\)/g, "ast.literal_eval($1)");
+  patchedLine = patchedLine.replace(/\bexec\(([^\n\)]*)\)/g, "# exec removed for safety: $1");
+  if (patchedLine === originalLine) {
+    return code;
+  }
+
+  lines[idx] = patchedLine;
+  let next = lines.join("\n");
+  const hasImportAst = /^\s*import\s+ast\s*$/m.test(next);
+  if (!hasImportAst && next !== code) {
+    next = `import ast\n${next}`;
+  }
+  return next;
+}
+
+function applyTabsFix(code, lineNumber) {
+  const lines = code.split("\n");
+  const idx = getClampedLineIndex(lines, lineNumber);
+  if (idx === -1) {
+    return code;
+  }
+  lines[idx] = lines[idx].replace(/\t/g, "    ");
+  return lines.join("\n");
+}
+
+function applyJsVarFix(code, lineNumber) {
+  const lines = code.split("\n");
+  const idx = getClampedLineIndex(lines, lineNumber);
+  if (idx === -1) {
+    return code;
+  }
+  lines[idx] = lines[idx].replace(/\bvar\b/g, "let");
+  return lines.join("\n");
+}
+
+function applyJsEvalFix(code, lineNumber) {
+  const lines = code.split("\n");
+  const idx = getClampedLineIndex(lines, lineNumber);
+  if (idx === -1) {
+    return code;
+  }
+  lines[idx] = lines[idx].replace(/\beval\(/g, "/* eval removed */ (");
+  return lines.join("\n");
+}
+
+function applyBackendSecurityFix(code, suggestion) {
+  const text = `${suggestion?.message || ""} ${suggestion?.rationale || ""}`.toLowerCase();
+  const lineNumber = suggestion?.anchor?.line;
+
+  if (text.includes("secret") || text.includes("password") || text.includes("token") || text.includes("api key")) {
+    return applySecretFix(code, lineNumber);
+  }
+  if (text.includes("eval") || text.includes("exec") || text.includes("dangerous")) {
+    return applyDynamicExecFix(code, lineNumber);
+  }
+  if (text.includes("tab")) {
+    return applyTabsFix(code, lineNumber);
+  }
+  return code;
+}
+
+function applyBackendQualityFix(code, suggestion) {
+  const text = `${suggestion?.message || ""} ${suggestion?.rationale || ""}`.toLowerCase();
+  const lineNumber = suggestion?.anchor?.line;
+
+  if (text.includes("repeated") && text.includes("print")) {
+    return applyPythonLoopRefactor(code, lineNumber);
+  }
+
+  return code;
+}
+
+function applyQuickFixToCode(code, ruleId, suggestion) {
+  const lineNumber = suggestion?.anchor?.line;
+  switch (ruleId) {
+    case "python.loop.refactor":
+      if (suggestion?.before && suggestion?.after) {
+        const snippetResult = applyBeforeAfterSnippet(code, suggestion);
+        if (snippetResult !== code) {
+          return snippetResult;
+        }
+      }
+      return applyPythonLoopRefactor(code, lineNumber);
+    case "secrets.hardcoded":
+      return applySecretFix(code, lineNumber);
+    case "python.unsafe.dynamic-exec":
+      return applyDynamicExecFix(code, lineNumber);
+    case "style.tabs":
+      return applyTabsFix(code, lineNumber);
+    case "js.var.legacy":
+      return applyJsVarFix(code, lineNumber);
+    case "js.unsafe.eval":
+      return applyJsEvalFix(code, lineNumber);
+    case "security.warning":
+      return applyBackendSecurityFix(code, suggestion);
+    case "quality.review":
+    case "quality.grade":
+      return applyBackendQualityFix(code, suggestion);
+    default:
+      return code;
+  }
+}
+
+function setCodeInTextarea(nextCode) {
+  const textarea = getPrimaryTextarea();
+  if (!textarea) {
+    return false;
+  }
+  textarea.value = nextCode;
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  textarea.dispatchEvent(new Event("change", { bubbles: true }));
+  textarea.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: " " }));
+  return true;
+}
+
+function setCodeInCodeMirror5(nextCode) {
+  const cmRoot = document.querySelector(".CodeMirror");
+  const cm = cmRoot && cmRoot.CodeMirror;
+  if (!cm || typeof cm.setValue !== "function") {
+    return false;
+  }
+  cm.setValue(nextCode);
+  return true;
+}
+
+function setCodeInCodeMirror6(nextCode) {
+  const cmRoot = document.querySelector(".cm-editor");
+  if (!cmRoot) {
+    return false;
+  }
+
+  const view = cmRoot.cmView?.view || cmRoot.cmView || cmRoot.view;
+  if (!view || !view.state || typeof view.dispatch !== "function") {
+    return false;
+  }
+
+  const from = 0;
+  const to = view.state.doc.length;
+  view.dispatch({ changes: { from, to, insert: nextCode } });
+  return true;
+}
+
+function setCodeInAce(nextCode) {
+  const aceRoot = document.querySelector(".ace_editor");
+  if (!aceRoot || !window.ace || typeof window.ace.edit !== "function") {
+    return false;
+  }
+
+  try {
+    const editor = window.ace.edit(aceRoot);
+    editor.setValue(nextCode, -1);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function setCodeInMonaco(nextCode) {
+  const monacoApi = window.monaco?.editor;
+  if (!monacoApi) {
+    return false;
+  }
+
+  try {
+    const editors = typeof monacoApi.getEditors === "function" ? monacoApi.getEditors() : [];
+    const targetEditor = editors && editors.length ? editors[0] : null;
+    if (targetEditor && typeof targetEditor.setValue === "function") {
+      targetEditor.setValue(nextCode);
+      return true;
+    }
+
+    const model = typeof monacoApi.getModels === "function" ? (monacoApi.getModels()[0] || null) : null;
+    if (model && typeof model.setValue === "function") {
+      model.setValue(nextCode);
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
+function setCodeInEditor(nextCode) {
+  // Prefer concrete editor APIs first, then fallback to textarea writes.
+  if (setCodeInMonaco(nextCode)) {
+    return true;
+  }
+  if (setCodeInCodeMirror6(nextCode)) {
+    return true;
+  }
+  if (setCodeInCodeMirror5(nextCode)) {
+    return true;
+  }
+  if (setCodeInAce(nextCode)) {
+    return true;
+  }
+  return setCodeInTextarea(nextCode);
+}
+
+async function applyQuickFix(ruleId, suggestion) {
+  const original = extractCode();
+  if (!original) {
+    return { ok: false, error: "No code found in active editor." };
+  }
+
+  let next = original;
+  let usedValidatedFix = false;
+
+  if (hasExtensionContext()) {
+    try {
+      const backendFix = await chrome.runtime.sendMessage({
+        type: "VALIDATE_QUICK_FIX",
+        payload: {
+          code: original,
+          language: detectLanguageByUrl(),
+          suggestion: {
+            ...(suggestion || {}),
+            rule_id: ruleId
+          }
+        }
+      });
+
+      if (backendFix?.ok && backendFix?.fixedCode) {
+        next = backendFix.fixedCode;
+        usedValidatedFix = true;
+      }
+    } catch {
+      // Fallback to local transform if backend is unreachable.
+    }
+  }
+
+  if (!usedValidatedFix) {
+    next = applyQuickFixToCode(original, ruleId, suggestion);
+  }
+
+  if (next === original) {
+    return {
+      ok: false,
+      error: usedValidatedFix
+        ? "Validated fix produced no changes."
+        : "No applicable auto-fix for this suggestion in current code."
+    };
+  }
+
+  const wrote = setCodeInEditor(next);
+  if (!wrote) {
+    return { ok: false, error: "Unable to apply quick fix in this editor." };
+  }
+
+  lastCode = "";
+  const site = detectSite() || "broad-detection";
+  publishSnapshot(site);
+  return { ok: true, source: usedValidatedFix ? "backend-validated" : "local-fallback" };
 }
 
 function ensureInlineStyles() {
@@ -102,6 +581,11 @@ function ensureInlineStyles() {
     .${HIGHLIGHT_CLASS}.cc-low {
       text-decoration-color: #f59e0b;
       background: rgba(245, 158, 11, 0.09);
+    }
+    .cc-inline-block-highlight {
+      outline: 2px solid rgba(239, 68, 68, 0.4);
+      outline-offset: 2px;
+      border-radius: 6px;
     }
     #${INLINE_CARD_ID} {
       position: fixed;
@@ -195,7 +679,7 @@ function hideInlineCard() {
 
 function clearInlineHighlights() {
   document.querySelectorAll(`.${HIGHLIGHT_CLASS}`).forEach((el) => {
-    el.classList.remove(HIGHLIGHT_CLASS, "cc-high", "cc-medium", "cc-low");
+    el.classList.remove(HIGHLIGHT_CLASS, "cc-high", "cc-medium", "cc-low", "cc-inline-block-highlight");
     el.removeAttribute("data-cc-key");
   });
   activeSuggestionByKey = new Map();
@@ -291,35 +775,55 @@ function renderInlineSuggestions(result) {
     return;
   }
 
+  const normalizedSuggestions = suggestions.map((item, index) => {
+    if (item?.anchor?.line) {
+      return item;
+    }
+    return {
+      ...item,
+      anchor: { line: index + 1 }
+    };
+  });
+
   const monacoLines = Array.from(document.querySelectorAll(".monaco-editor .view-lines .view-line, .view-lines .view-line"));
   if (monacoLines.length) {
-    applyHighlightsToLineNodes(monacoLines, suggestions);
+    applyHighlightsToLineNodes(monacoLines, normalizedSuggestions);
     return;
   }
 
   const codeMirrorLines = Array.from(document.querySelectorAll(".cm-editor .cm-line, .cm-content .cm-line, .CodeMirror-code pre"));
   if (codeMirrorLines.length) {
-    applyHighlightsToLineNodes(codeMirrorLines, suggestions);
+    applyHighlightsToLineNodes(codeMirrorLines, normalizedSuggestions);
     return;
   }
 
   const aceLines = Array.from(document.querySelectorAll(".ace_line"));
   if (aceLines.length) {
-    applyHighlightsToLineNodes(aceLines, suggestions);
+    applyHighlightsToLineNodes(aceLines, normalizedSuggestions);
     return;
   }
 
   const textarea = document.querySelector("textarea");
   if (textarea) {
-    const key = getSuggestionKey(suggestions[0], suggestions[0]?.anchor?.line || 1);
-    activeSuggestionByKey.set(key, suggestions[0]);
+    const key = getSuggestionKey(normalizedSuggestions[0], normalizedSuggestions[0]?.anchor?.line || 1);
+    activeSuggestionByKey.set(key, normalizedSuggestions[0]);
     textarea.classList.add(HIGHLIGHT_CLASS, "cc-medium");
     textarea.dataset.ccKey = key;
+    return;
+  }
+
+  const editorContainer = document.querySelector(".monaco-editor, .cm-editor, .CodeMirror, .ace_editor");
+  if (editorContainer) {
+    const firstSuggestion = normalizedSuggestions[0];
+    const key = getSuggestionKey(firstSuggestion, firstSuggestion?.anchor?.line || 1);
+    activeSuggestionByKey.set(key, firstSuggestion);
+    editorContainer.classList.add(HIGHLIGHT_CLASS, "cc-medium", "cc-inline-block-highlight");
+    editorContainer.dataset.ccKey = key;
   }
 }
 
 async function shouldEnableBroadMode() {
-  const settings = await chrome.storage.sync.get({ broadDetection: false });
+  const settings = await safeStorageGet({ broadDetection: false });
   return !!settings.broadDetection;
 }
 
@@ -348,7 +852,7 @@ function publishSnapshot(site) {
   }
   lastCode = code;
 
-  chrome.runtime.sendMessage({
+  safeSendMessage({
     type: "CODE_SNAPSHOT",
     payload: {
       code,
@@ -369,17 +873,21 @@ function scheduleSnapshot(site) {
 async function start() {
   const status = await isSupportedContext();
 
-  chrome.runtime.sendMessage({
-    type: "SITE_STATUS",
-    site: status.site,
-    supported: status.supported
-  });
+  // In iframe-heavy sites, only the frame with editor should mark supported.
+  if (status.supported || window.top === window) {
+    safeSendMessage({
+      type: "SITE_STATUS",
+      site: status.site,
+      supported: status.supported
+    });
+  }
 
   if (!status.supported) {
     return;
   }
 
   publishSnapshot(status.site);
+  requestLatestResultAndRender();
 
   const observer = new MutationObserver(() => scheduleSnapshot(status.site));
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -388,14 +896,29 @@ async function start() {
   window.addEventListener("paste", () => scheduleSnapshot(status.site));
 }
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "ANALYSIS_RESULT") {
-    latestResult = message.payload;
-    renderInlineSuggestions(latestResult);
-  }
-  if (message?.type === "ANALYSIS_ERROR") {
-    clearInlineHighlights();
-  }
-});
+if (hasExtensionContext()) {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "ANALYSIS_RESULT") {
+      latestResult = message.payload;
+      renderInlineSuggestions(latestResult);
+      return;
+    }
+    if (message?.type === "ANALYSIS_ERROR") {
+      clearInlineHighlights();
+      return;
+    }
+    if (message?.type === "APPLY_QUICK_FIX") {
+      const ruleId = message?.payload?.ruleId;
+      if (!ruleId) {
+        sendResponse({ ok: false, error: "Missing rule id for quick fix." });
+        return true;
+      }
+      applyQuickFix(ruleId, message?.payload?.suggestion || null)
+        .then((result) => sendResponse(result))
+        .catch((error) => sendResponse({ ok: false, error: String(error?.message || error || "Quick fix failed") }));
+      return true;
+    }
+  });
+}
 
 start();

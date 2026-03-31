@@ -26,3 +26,17 @@ class AnalyzeResponse(BaseModel):
     execution: dict[str, Any]
     grading_tool_output: dict[str, Any]
     suggestions: list[Suggestion]
+
+
+class FixRequest(BaseModel):
+    code: str = Field(min_length=1)
+    language: str = Field(default="python")
+    suggestion: Suggestion
+    exec_timeout_s: int | None = Field(default=None, ge=1, le=30)
+
+
+class FixResponse(BaseModel):
+    applied: bool
+    fixed_code: str
+    message: str
+    validation: dict[str, Any] = Field(default_factory=dict)
