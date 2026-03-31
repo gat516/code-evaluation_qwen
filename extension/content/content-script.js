@@ -630,6 +630,9 @@ function normalizeQuickFixSuggestion(ruleId, suggestion) {
 }
 
 function canAttemptQuickFix(ruleId, suggestion) {
+  if (suggestion?.prefetched_fix?.fixed_code) {
+    return true;
+  }
   if (suggestion?.after && String(suggestion.after).trim()) {
     return true;
   }
@@ -679,6 +682,11 @@ function shouldQueryBackendForQuickFix(ruleId) {
 }
 
 async function requestBackendQuickFix(code, ruleId, suggestion, previewOnly = false) {
+  const prefetchedCode = String(suggestion?.prefetched_fix?.fixed_code || "");
+  if (!previewOnly && prefetchedCode && prefetchedCode !== code) {
+    return { ok: true, code: prefetchedCode, source: "backend-prefetched" };
+  }
+
   if (!canAttemptQuickFix(ruleId, suggestion)) {
     return { ok: false, reason: "This suggestion does not include an automatic fix." };
   }
@@ -748,19 +756,6 @@ function requestLocalQuickFix(code, ruleId, suggestion) {
   return { ok: true, code: localCode, source: "local-fallback" };
 }
 
-function requestLocalQuickFixPreview(code, ruleId, suggestion) {
-  const localResult = requestLocalQuickFix(code, ruleId, suggestion);
-  if (!localResult.ok) {
-    return localResult;
-  }
-  return {
-    ok: true,
-    code: localResult.code,
-    source: "local-preview",
-    message: "Preview generated from local fallback transform."
-  };
-}
-
 function buildQuickFixFailure(primaryReason, fallbackReason) {
   if (primaryReason && fallbackReason) {
     return `${primaryReason} Local fallback also failed: ${fallbackReason}`;
@@ -777,7 +772,15 @@ async function applyQuickFix(ruleId, suggestion) {
   const backendResult = await requestBackendQuickFix(original, ruleId, suggestion);
   let selectedResult = backendResult;
 
-  if (!backendResult.ok) {
+  // Python fixes are server-owned to keep behavior consistent with backend validation.
+  if (detectLanguageByUrl() === "python") {
+    if (!backendResult.ok) {
+      return {
+        ok: false,
+        error: backendResult.reason || "Backend could not apply a safe fix."
+      };
+    }
+  } else if (!backendResult.ok) {
     const localResult = requestLocalQuickFix(original, ruleId, suggestion);
     if (!localResult.ok) {
       return {
@@ -798,34 +801,6 @@ async function applyQuickFix(ruleId, suggestion) {
   publishSnapshot(site);
   safeSendMessage({ type: "FORCE_REANALYZE" });
   return { ok: true, source: selectedResult.source };
-}
-
-async function previewQuickFix(ruleId, suggestion) {
-  const original = extractCode();
-  if (!original) {
-    return { ok: false, error: "No code found in active editor." };
-  }
-
-  const backendResult = await requestBackendQuickFix(original, ruleId, suggestion, true);
-  let selectedResult = backendResult;
-  if (!backendResult.ok) {
-    const localResult = requestLocalQuickFixPreview(original, ruleId, suggestion);
-    if (!localResult.ok) {
-      return {
-        ok: false,
-        error: buildQuickFixFailure(backendResult.reason, localResult.reason)
-      };
-    }
-    selectedResult = localResult;
-  }
-
-  return {
-    ok: true,
-    source: selectedResult.source,
-    message: selectedResult.message || "Preview generated.",
-    originalCode: original,
-    previewCode: selectedResult.code
-  };
 }
 
 function ensureInlineStyles() {
@@ -904,6 +879,18 @@ function ensureInlineStyles() {
     #${INLINE_CARD_ID} .cc-rationale {
       color: #334155;
     }
+    #${INLINE_CARD_ID} .cc-fix-preview {
+      margin-top: 8px;
+      border: 1px solid rgba(15, 23, 42, 0.14);
+      background: #f8fafc;
+      border-radius: 6px;
+      padding: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 11px;
+      white-space: pre-wrap;
+      max-height: 120px;
+      overflow: auto;
+    }
     #${INLINE_CARD_ID} .cc-actions {
       margin-top: 8px;
     }
@@ -931,6 +918,43 @@ function getOrCreateInlineCard() {
   return card;
 }
 
+function escapeInlineHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function getPrefetchedPreviewForRange(suggestion) {
+  const fixedCode = String(suggestion?.prefetched_fix?.fixed_code || "");
+  if (!fixedCode) {
+    return "";
+  }
+
+  const range = suggestion?.fix?.range || {};
+  const startLine = Number(range.startLine || suggestion?.line || suggestion?.anchor?.line || 1);
+  const endLineRaw = Number(range.endLine || suggestion?.end_line || startLine);
+  const endLine = Number.isInteger(endLineRaw) && endLineRaw >= startLine ? endLineRaw : startLine;
+
+  const lines = fixedCode.split("\n");
+  if (!Number.isInteger(startLine) || startLine < 1 || startLine > lines.length) {
+    return "";
+  }
+
+  const boundedEnd = Math.min(endLine, lines.length);
+  return lines.slice(startLine - 1, boundedEnd).join("\n").trim();
+}
+
+function getInlineFixPreviewText(suggestion) {
+  const replacement = String(suggestion?.after || suggestion?.fix?.replacement || "").trim();
+  if (replacement) {
+    return replacement;
+  }
+  return getPrefetchedPreviewForRange(suggestion);
+}
+
 function showInlineCard(suggestion, rect) {
   const card = getOrCreateInlineCard();
   if (cardHideTimer) {
@@ -945,7 +969,7 @@ function showInlineCard(suggestion, rect) {
       : "cc-low";
   currentCardSuggestion = suggestion;
 
-  const fixText = suggestion?.after || suggestion?.fix?.replacement || "";
+  const fixText = getInlineFixPreviewText(suggestion);
   const hasFix = !!String(fixText).trim();
   const actionText = hasFix ? "Copy suggested fix" : "Copy suggestion details";
   const canApply = canAttemptQuickFix(suggestion?.rule_id, suggestion);
@@ -955,6 +979,7 @@ function showInlineCard(suggestion, rect) {
     <strong>${suggestion.message}</strong>
     <div><em>${suggestion.category || "issue"} | ${suggestion.severity || suggestion.legacySeverity || "info"}</em></div>
     <div class="cc-rationale">${suggestion.rationale || suggestion.message || "No details provided."}</div>
+    ${hasFix ? `<div class="cc-fix-preview">${escapeInlineHtml(fixText)}</div>` : ""}
     <div class="cc-actions">
       ${canApply ? '<button type="button" data-cc-action="apply-fix">Apply Fix</button>' : ""}
       <button type="button" data-cc-action="dismiss">Dismiss</button>
@@ -1111,6 +1136,12 @@ function getNormalizedSuggestions(suggestions) {
   });
 }
 
+function hasRenderableFixSuggestion(suggestion) {
+  const replacement = String(suggestion?.after || suggestion?.fix?.replacement || "").trim();
+  const prefetchedCode = String(suggestion?.prefetched_fix?.fixed_code || "").trim();
+  return Boolean(replacement || prefetchedCode);
+}
+
 function renderFallbackContainerOverlay(suggestions) {
   const editorContainer = document.querySelector(".monaco-editor, .cm-editor, .CodeMirror, .ace_editor");
   if (!editorContainer || !suggestions.length) {
@@ -1187,6 +1218,22 @@ function attachHoverHandlers() {
         return;
       }
       const result = await applyQuickFix(ruleId, currentCardSuggestion);
+      if (result?.ok) {
+        const appliedKey = getSuggestionKey(
+          currentCardSuggestion,
+          Number(currentCardSuggestion?.line || currentCardSuggestion?.anchor?.line || 1)
+        );
+        const remainingSuggestions = (latestResult?.suggestions || []).filter((item) => {
+          const itemKey = getSuggestionKey(item, Number(item?.line || item?.anchor?.line || 1));
+          return itemKey !== appliedKey;
+        });
+        latestResult = {
+          ...(latestResult || {}),
+          suggestions: remainingSuggestions
+        };
+        dismissedSuggestionKeys.add(appliedKey);
+        renderInlineSuggestions(latestResult);
+      }
       button.textContent = result?.ok ? "Applied" : "Apply failed";
       setTimeout(() => {
         button.textContent = "Apply Fix";
@@ -1218,7 +1265,7 @@ function renderInlineSuggestions(result) {
   attachHoverHandlers();
   clearInlineHighlights();
 
-  const suggestions = result?.suggestions || [];
+  const suggestions = (result?.suggestions || []).filter((item) => hasRenderableFixSuggestion(item));
   if (!suggestions.length) {
     return;
   }
@@ -1405,17 +1452,6 @@ if (hasExtensionContext()) {
       applyQuickFix(ruleId, message?.payload?.suggestion || null)
         .then((result) => sendResponse(result))
         .catch((error) => sendResponse({ ok: false, error: String(error?.message || error || "Quick fix failed") }));
-      return true;
-    }
-    if (message?.type === "PREVIEW_QUICK_FIX") {
-      const ruleId = message?.payload?.ruleId;
-      if (!ruleId) {
-        sendResponse({ ok: false, error: "Missing rule id for quick fix preview." });
-        return true;
-      }
-      previewQuickFix(ruleId, message?.payload?.suggestion || null)
-        .then((result) => sendResponse(result))
-        .catch((error) => sendResponse({ ok: false, error: String(error?.message || error || "Quick fix preview failed") }));
       return true;
     }
   });
