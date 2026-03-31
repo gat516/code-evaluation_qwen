@@ -8,6 +8,7 @@
       body { font-family: Segoe UI, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
       label { display: block; margin-top: 14px; font-weight: 600; }
       input[type="text"] { width: 100%; padding: 8px; }
+      select { width: 100%; padding: 8px; }
       .row { margin-top: 12px; }
       button { margin-top: 18px; padding: 10px 14px; background: #0f766e; color: #fff; border: 0; border-radius: 8px; }
       #saved { margin-top: 8px; color: #065f46; }
@@ -15,7 +16,19 @@
   </head>
   <body>
     <h1>Code Coach Settings</h1>
-    <p>Configure detection and local analysis behavior.</p>
+    <p>Configure detection and suggestion analysis behavior.</p>
+
+    <label for="analysisMode">Analysis mode</label>
+    <select id="analysisMode">
+      <option value="local">Local rules (fast, offline)</option>
+      <option value="ai">AI backend (Qwen suggestions)</option>
+    </select>
+
+    <label for="backendUrl">Backend URL (AI mode)</label>
+    <input id="backendUrl" type="text" placeholder="http://127.0.0.1:8000" />
+
+    <label for="apiKey">API Key (optional)</label>
+    <input id="apiKey" type="text" placeholder="X-API-Key value" />
 
     <div class="row">
       <label><input id="broadDetection" type="checkbox" /> Enable broad editor detection (Monaco/CodeMirror/Ace/Textarea)</label>

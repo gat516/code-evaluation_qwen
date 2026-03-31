@@ -1,10 +1,13 @@
-{
+ssh char@10.144.50.20{
   "manifest_version": 3,
   "name": "Code Coach",
   "version": "0.1.0",
   "description": "Grammarly-style coding suggestions on supported coding websites.",
   "permissions": ["storage", "activeTab", "sidePanel"],
   "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "http://10.144.50.20:8000/*",
     "https://onecompiler.com/*",
     "https://replit.com/*",
     "https://leetcode.com/*",

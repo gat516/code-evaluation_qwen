@@ -14,6 +14,9 @@ function hashKey(input) {
 
 async function getSettings() {
   const defaults = {
+    analysisMode: "local",
+    backendUrl: "http://127.0.0.1:8000",
+    apiKey: "",
     broadDetection: false,
     autoAnalyze: true
   };
@@ -180,6 +183,87 @@ function analyzeCodeLocally(snapshot) {
   };
 }
 
+function findLineForTokens(lines, tokens) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const normalized = lines[i].toLowerCase();
+    if (tokens.some((token) => normalized.includes(token))) {
+      return i + 1;
+    }
+  }
+  return 1;
+}
+
+function ensureAnchors(suggestions, code) {
+  const lines = (code || "").split("\n");
+  return (suggestions || []).map((item) => {
+    if (item?.anchor?.line) {
+      return item;
+    }
+
+    const searchBase = `${item?.message || ""} ${item?.rationale || ""}`.toLowerCase();
+    let line = 1;
+    if (searchBase.includes("eval") || searchBase.includes("exec")) {
+      line = findLineForTokens(lines, ["eval(", "exec("]);
+    } else if (searchBase.includes("secret") || searchBase.includes("password") || searchBase.includes("token") || searchBase.includes("api key")) {
+      line = findLineForTokens(lines, ["password", "token", "api_key", "apikey", "api-key"]);
+    } else if (searchBase.includes("print") || searchBase.includes("loop") || searchBase.includes("repeated")) {
+      line = findLineForTokens(lines, ["print(", "for ", "while "]);
+    } else if (searchBase.includes("tab")) {
+      line = findLineForTokens(lines, ["\t"]);
+    } else if (searchBase.includes("var") || searchBase.includes("let") || searchBase.includes("const")) {
+      line = findLineForTokens(lines, ["var ", "let ", "const "]);
+    }
+
+    return {
+      ...item,
+      anchor: { line }
+    };
+  });
+}
+
+async function analyzeCodeWithBackend(snapshot, settings) {
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  if (settings.apiKey) {
+    headers["X-API-Key"] = settings.apiKey;
+  }
+
+  const response = await fetch(`${settings.backendUrl}/analyze`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      code: snapshot.code,
+      language: snapshot.language || "python",
+      site: snapshot.site,
+      metadata: {
+        url: snapshot.url,
+        source: "extension"
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const msg = body?.detail?.message || body?.detail?.error || `Backend returned ${response.status}`;
+    throw new Error(msg);
+  }
+
+  const result = await response.json();
+  const normalized = {
+    ...result,
+    suggestions: ensureAnchors(result.suggestions || [], snapshot.code),
+    metadata: {
+      ...(result.metadata || {}),
+      analyzer: "ai-backend",
+      mode: "ai"
+    }
+  };
+
+  return normalized;
+}
+
 async function setBadge(tabId, isSupported) {
   if (!tabId) {
     return;
@@ -195,15 +279,19 @@ async function setBadge(tabId, isSupported) {
 }
 
 async function analyzeSnapshot(tabId, snapshot) {
-  const cacheKey = hashKey(`${snapshot.language}|${snapshot.site}|${snapshot.code}`);
+  const settings = await getSettings();
+  const mode = settings.analysisMode || "local";
+  const cacheKey = hashKey(`${mode}|${settings.backendUrl || ""}|${snapshot.language}|${snapshot.site}|${snapshot.code}`);
 
   if (cache.has(cacheKey)) {
+    const cached = cache.get(cacheKey);
     tabState.set(tabId, {
       ...tabState.get(tabId),
       status: "result",
-      result: cache.get(cacheKey),
+      result: cached,
       updatedAt: Date.now()
     });
+    chrome.tabs.sendMessage(tabId, { type: "ANALYSIS_RESULT", payload: cached }).catch(() => {});
     return;
   }
 
@@ -214,7 +302,9 @@ async function analyzeSnapshot(tabId, snapshot) {
   });
 
   try {
-    const result = analyzeCodeLocally(snapshot);
+    const result = mode === "ai"
+      ? await analyzeCodeWithBackend(snapshot, settings)
+      : analyzeCodeLocally(snapshot);
     cache.set(cacheKey, result);
 
     tabState.set(tabId, {

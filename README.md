@@ -1,19 +1,84 @@
-# Code Coach Extension
+# Code Coach
 
-Chrome extension that provides Grammarly-style coding suggestions on supported coding websites.
+Code suggestion assistant for coding websites, with two analysis modes:
 
-This project is extension-only and uses local in-browser rule checks (no backend server required).
+- local rule-based suggestions (fast)
+- AI backend suggestions (Qwen)
 
-## Current features
 
-- site allowlist detection: OneCompiler, Replit, LeetCode, HackerRank
-- optional broad detection mode for Monaco/CodeMirror/Ace/Textarea editors
-- debounced analysis while typing
-- side panel with categorized suggestions and severity labels
-- inline highlights with hover suggestion cards in supported editors
-- manual refresh button in side panel
+## Setup
 
-## Load extension in Chrome
+```bash
+conda env create -f environment.yml
+conda activate gpu-env
+```
+
+## Start AI suggestion backend
+
+Start Qwen server:
+
+```bash
+python start_server.py
+```
+
+Start API wrapper:
+
+```bash
+uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Analyze example request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+    "code": "for i in range(10):\n    print(i)",
+    "language": "python",
+    "site": "onecompiler",
+    "metadata": {"source": "manual"}
+  }'
+```
+
+## Backend API
+
+Endpoints:
+
+- `GET /health`
+- `POST /analyze`
+
+Environment variables:
+
+- `QWEN_BASE_URL` (default `http://localhost:30001/v1`)
+- `MODEL_ID` (default `default`)
+- `QWEN_API_KEY` (default `n/a`)
+- `REQUEST_TIMEOUT` (default `30`)
+- `EXEC_TIMEOUT` (default `2`)
+- `EXTENSION_API_KEY` (if set, API requires `X-API-Key`)
+- `CORS_ALLOW_ORIGINS` (default `*`, comma-separated list supported)
+- `MODEL_PATH` (default `Qwen/Qwen2.5-0.5B-Instruct`)
+- `MODEL_SERVER_PORT` (default `30001`)
+- `MODEL_SERVER_HOST` (default `0.0.0.0`)
+
+## Chrome extension
+
+Location: `extension/`
+
+Features:
+
+- allowlist detection for OneCompiler, Replit, LeetCode, and HackerRank
+- optional broad detection mode (Monaco/CodeMirror/Ace/Textarea) in settings
+- inline highlights with hover cards (Grammarly-style)
+- side panel for grouped suggestions
+- local mode and AI backend mode toggle
+
+Load in Chrome:
 
 1. Open `chrome://extensions`
 2. Enable `Developer mode`
@@ -24,42 +89,34 @@ This project is extension-only and uses local in-browser rule checks (no backend
 
 Open extension options and configure:
 
+- `Analysis mode`
+	- `Local rules (fast, offline)`
+	- `AI backend (Qwen suggestions)`
+- `Backend URL` (for AI mode), default `http://127.0.0.1:8000`
+- `API Key` (optional)
+- `Broad editor detection`
 - `Auto-analyze while typing`
-- `Enable broad editor detection`
 
-## Supported websites
+## ZeroTier / remote backend workflow
 
-- `https://onecompiler.com/*`
-- `https://replit.com/*`
-- `https://leetcode.com/*`
-- `https://www.hackerrank.com/*`
+If AI backend runs remotely but browser is local, use SSH port forwarding:
 
-## How analysis works
+```bash
+ssh -N -L 8000:127.0.0.1:8000 char@10.144.50.20
+```
 
-Analysis runs in the extension service worker using lightweight local rules.
+Then set extension backend URL to:
 
-Current rule coverage includes:
-
-- repeated print statements (loop refactor hint)
-- dangerous dynamic execution patterns (`eval`, `exec`)
-- potential hardcoded secrets (`password`, `token`, `api_key`)
-- tabs/style consistency hints
-- JavaScript `var` usage hint (`let`/`const` preferred)
-
-## Local testing flow
-
-1. Load extension in Chrome
-2. Open a supported coding site
-3. Type or paste code in the editor
-4. Click the extension icon to open the side panel
-5. Review suggestions
+- `http://127.0.0.1:8000`
 
 ## Troubleshooting
 
-- Extension appears inactive:
-  - refresh the target page after loading/reloading the extension
-  - confirm URL matches supported domains
-- No suggestions appear:
-  - ensure there is code in the editor
-  - click `Refresh Analysis` in the side panel
-  - check `chrome://extensions` -> `Code Coach` -> `service worker` logs
+- AI mode shows connection errors:
+	- verify local `curl http://127.0.0.1:8000/health`
+	- verify tunnel is active if backend is remote
+	- reload extension in `chrome://extensions`
+- No inline highlights:
+	- refresh coding site tab after extension reload
+	- ensure page is one of supported sites or broad detection is enabled
+	- open service worker logs in `chrome://extensions`
+
