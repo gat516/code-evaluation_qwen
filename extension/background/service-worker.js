@@ -155,6 +155,10 @@ function isSuggestionRelevantToCode(suggestion, code) {
   const text = `${suggestion?.message || ""} ${suggestion?.rationale || ""}`.toLowerCase();
   const codeLower = String(code || "").toLowerCase();
 
+  if (text.includes("no issues found") || text.includes("no issue found") || text.includes("no problems found") || text.includes("looks good")) {
+    return false;
+  }
+
   // Guard against a common hallucination where model flags lowercase none/true/false when code doesn't contain it.
   if (text.includes("nameerror") && text.includes("none") && !/\bnone\b/.test(codeLower)) {
     return false;

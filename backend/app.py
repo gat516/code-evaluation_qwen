@@ -133,6 +133,21 @@ def _build_repetition_suggestion(code: str) -> AnalyzeSuggestion | None:
     )
 
 
+def _is_noop_suggestion(suggestion: AnalyzeSuggestion) -> bool:
+    msg = (suggestion.message or "").strip().lower()
+    if not msg:
+        return True
+
+    noop_markers = (
+        "no issues found",
+        "no issue found",
+        "no problems found",
+        "looks good",
+        "code is correct",
+    )
+    return any(marker in msg for marker in noop_markers)
+
+
 def _build_suggestions(grading_tool_output: dict, execution: dict, code: str) -> list[AnalyzeSuggestion]:
     suggestions: list[AnalyzeSuggestion] = []
     grade = grading_tool_output.get("grade")
@@ -497,6 +512,13 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
         model_name, content = query_chat_completions(messages)
         parsed_suggestions = parse_llm_suggestions(content)
         suggestions = [AnalyzeSuggestion(**item) for item in parsed_suggestions]
+        suggestions = [item for item in suggestions if not _is_noop_suggestion(item)]
+
+        if not suggestions:
+            repeated_print = _build_repetition_suggestion(payload.code)
+            if repeated_print:
+                suggestions = [repeated_print]
+
         metadata["llm_raw_empty"] = not bool(content.strip())
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
