@@ -307,6 +307,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "WRITE_CODE_MAIN_WORLD" && tabId) {
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: (code) => {
+        let ok = false;
+        try {
+          const api = window.monaco?.editor;
+          if (api) {
+            const editors = api.getEditors() || [];
+            const ed = editors.find(e => { try { return e.hasTextFocus(); } catch { return false; } }) || editors[0];
+            if (ed && typeof ed.setValue === "function") { ed.setValue(code); ok = true; }
+          }
+        } catch(e) {}
+        if (!ok) try {
+          const cm = document.querySelector(".cm-editor");
+          if (cm) {
+            const view = cm.cmView?.view || cm.cmView || cm.view;
+            if (view?.state && typeof view.dispatch === "function") {
+              view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: code } });
+              ok = true;
+            }
+          }
+        } catch(e) {}
+        if (!ok) try {
+          const cm = document.querySelector(".CodeMirror");
+          if (cm?.CodeMirror && typeof cm.CodeMirror.setValue === "function") { cm.CodeMirror.setValue(code); ok = true; }
+        } catch(e) {}
+        if (!ok) try {
+          const root = document.querySelector(".ace_editor");
+          if (root && window.ace && typeof window.ace.edit === "function") { window.ace.edit(root).setValue(code, -1); ok = true; }
+        } catch(e) {}
+        return ok;
+      },
+      args: [message.code]
+    }).then(results => {
+      sendResponse({ ok: results?.[0]?.result === true });
+    }).catch(err => {
+      sendResponse({ ok: false, error: String(err) });
+    });
+    return true;
+  }
+
   if (message?.type === "FORCE_REANALYZE" && tabId) {
     const state = tabState.get(tabId);
     if (state?.snapshot) {

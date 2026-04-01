@@ -184,7 +184,17 @@ function setCodeInTextarea(code) {
   return true;
 }
 
-function setCodeInEditor(code) {
+async function setCodeViaMainWorld(code) {
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "WRITE_CODE_MAIN_WORLD", code });
+    return !!result?.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function setCodeInEditor(code) {
+  if (await setCodeViaMainWorld(code)) return true;
   return setCodeInMonaco(code) || setCodeInCodeMirror6(code) || setCodeInCodeMirror5(code) || setCodeInAce(code) || setCodeInTextarea(code);
 }
 
@@ -195,12 +205,21 @@ function applyFixToCode(code, suggestion) {
   if (!replacement) return null;
 
   const range = suggestion?.fix?.range || {};
-  const startLine = Number(range.startLine || suggestion?.line || 1);
-  const endLine = Number(range.endLine || suggestion?.end_line || startLine);
+  let startLine = Number(suggestion?.line || range.startLine || 1);
+  let endLine = Number(suggestion?.end_line || range.endLine || startLine);
 
   if (!Number.isInteger(startLine) || startLine < 1) return null;
 
   const lines = code.split("\n");
+
+
+  // Expand range to cover the full contiguous block of identical lines
+  if (startLine >= 1 && startLine <= lines.length) {
+    const targetLine = lines[startLine - 1];
+    while (startLine > 1 && lines[startLine - 2] === targetLine) startLine--;
+    while (endLine < lines.length && lines[endLine] === targetLine) endLine++;
+  }
+
   const boundedEnd = Math.min(endLine, lines.length);
   if (boundedEnd < startLine) return null;
 
@@ -221,7 +240,7 @@ async function applyQuickFix(suggestion) {
   const fixed = applyFixToCode(original, suggestion);
   if (!fixed) return { ok: false, error: "No replacement available for this suggestion." };
 
-  const wrote = setCodeInEditor(fixed);
+  const wrote = await setCodeInEditor(fixed);
   if (!wrote) return { ok: false, error: "Unable to write fix into this editor." };
 
   // Trigger re-analysis after applying the fix.
