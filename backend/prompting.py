@@ -7,19 +7,19 @@ from typing import Any
 SCHEMA_EXAMPLE = {
     "suggestions": [
         {
-            "line": 3,
-            "col": 4,
-            "end_line": 3,
-            "end_col": 22,
-            "severity": "error",
-            "message": "Potential IndexError: loop upper bound can exceed list length.",
+            "line": 1,
+            "col": 0,
+            "end_line": 1,
+            "end_col": 10,
+            "severity": "warning",
+            "message": "<short description of the issue>",
             "fix": {
-                "replacement": "for i in range(min(k, len(nums))):",
+                "replacement": "<corrected code that replaces the flagged lines>",
                 "range": {
-                    "startLine": 3,
-                    "startCol": 4,
-                    "endLine": 3,
-                    "endCol": 22,
+                    "startLine": 1,
+                    "startCol": 0,
+                    "endLine": 1,
+                    "endCol": 10,
                 },
             },
             "source": "ai",
