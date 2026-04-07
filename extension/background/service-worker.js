@@ -299,6 +299,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "READ_CODE_MAIN_WORLD" && tabId) {
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        // Monaco
+        try {
+          const api = window.monaco?.editor;
+          if (api) {
+            const editors = api.getEditors() || [];
+            const ed = editors.find(e => { try { return e.hasTextFocus(); } catch { return false; } }) || editors[0];
+            if (ed) {
+              const model = typeof ed.getModel === "function" ? ed.getModel() : null;
+              const code = typeof ed.getValue === "function" ? ed.getValue() : model?.getValue?.();
+              const langId = model?.getLanguageId?.() || model?.getModeId?.() || null;
+              if (code) return { code, editor: "monaco", langId };
+            }
+          }
+        } catch(e) {}
+        // CodeMirror 6
+        try {
+          const cm = document.querySelector(".cm-editor");
+          if (cm) {
+            const view = cm.cmView?.view || cm.cmView || cm.view;
+            if (view?.state?.doc) return { code: view.state.doc.toString(), editor: "cm6" };
+          }
+        } catch(e) {}
+        // CodeMirror 5
+        try {
+          const cm = document.querySelector(".CodeMirror");
+          if (cm?.CodeMirror && typeof cm.CodeMirror.getValue === "function")
+            return { code: cm.CodeMirror.getValue(), editor: "cm5" };
+        } catch(e) {}
+        // Ace
+        try {
+          const root = document.querySelector(".ace_editor");
+          if (root && window.ace && typeof window.ace.edit === "function")
+            return { code: window.ace.edit(root).getValue(), editor: "ace" };
+        } catch(e) {}
+        return null;
+      }
+    }).then(results => {
+      sendResponse(results?.[0]?.result || null);
+    }).catch(() => sendResponse(null));
+    return true;
+  }
+
   if (message?.type === "WRITE_CODE_MAIN_WORLD" && tabId) {
     chrome.scripting.executeScript({
       target: { tabId },

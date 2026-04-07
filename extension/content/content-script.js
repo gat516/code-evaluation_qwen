@@ -62,6 +62,29 @@ function detectSite() {
 }
 
 function detectLanguageByUrl() {
+  // Best source: Monaco's own language ID set by the page
+  if (detectedLangId) {
+    const id = detectedLangId.toLowerCase();
+    if (id.includes("python")) return "python";
+    if (id.includes("javascript") || id.includes("typescript")) return "javascript";
+    if (id.includes("java")) return "java";
+    if (id === "cpp" || id.includes("c++")) return "cpp";
+    if (id === "c") return "c";
+    if (id.includes("rust")) return "rust";
+    if (id.includes("go")) return "go";
+    return id;
+  }
+
+  // Fallback: LeetCode language selector DOM
+  const lcLang = document.querySelector("[data-cy='lang-select'] button, .ant-select-selection-item");
+  if (lcLang) {
+    const t = lcLang.textContent.toLowerCase();
+    if (t.includes("python")) return "python";
+    if (t.includes("javascript") || t.includes("typescript")) return "javascript";
+    if (t.includes("java")) return "java";
+    if (t.includes("c++") || t.includes("cpp")) return "cpp";
+  }
+
   const url = window.location.href.toLowerCase();
   if (url.includes("python") || url.includes("py")) return "python";
   if (url.includes("javascript") || url.includes("js")) return "javascript";
@@ -128,6 +151,18 @@ function extractFromTextarea() {
   const textareas = Array.from(document.querySelectorAll("textarea"));
   const ranked = textareas.map((t) => ({ el: t, len: (t.value || "").length })).sort((a, b) => b.len - a.len);
   return ranked[0]?.el?.value?.trim() || "";
+}
+
+let detectedLangId = null;
+
+async function extractCodeViaMainWorld() {
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "READ_CODE_MAIN_WORLD" });
+    if (result?.langId) detectedLangId = result.langId;
+    return result?.code || "";
+  } catch {
+    return "";
+  }
 }
 
 function extractCode() {
@@ -245,7 +280,7 @@ function findAnchorRange(lines, beforeText, hintStartLine) {
 
 function applyFixToCode(code, suggestion) {
   const fix = suggestion?.fix || {};
-  const replacement = String(fix.replacement || "").trim();
+  const replacement = String(fix.replacement || "").trimEnd();
   if (!replacement) return null;
 
   const beforeText = String(fix.before || "").trim();
@@ -257,23 +292,29 @@ function applyFixToCode(code, suggestion) {
   let startIdx, endIdx;
 
   if (beforeText) {
-    // Primary path: locate the exact before-block via anchor matching.
     const match = findAnchorRange(lines, beforeText, hintStartLine);
-    if (!match) {
-      // Before-anchor did not match the current code — abort rather than
-      // clobber an unrelated range.
-      return null;
-    }
+    if (!match) return null;
     [startIdx, endIdx] = match;
   } else {
-    // Fallback path: no before-anchor provided; use line-number hints directly.
-    // This handles legacy suggestions that have no before field.
     startIdx = Math.max(0, hintStartLine - 1);
     endIdx = Math.min(lines.length - 1, hintEndLine - 1);
     if (endIdx < startIdx) return null;
   }
 
-  const replacementLines = replacement.split("\n");
+  // Adjust replacement indentation to match the original first line
+  let replacementLines = replacement.split("\n");
+  const origIndent = (lines[startIdx] || "").match(/^\s*/)[0];
+  const replIndent = (replacementLines[0] || "").match(/^\s*/)[0];
+  if (origIndent !== replIndent) {
+    const diff = origIndent.length - replIndent.length;
+    replacementLines = replacementLines.map(l => {
+      if (l.trim() === "") return l;
+      if (diff > 0) return " ".repeat(diff) + l;
+      const strip = Math.min(-diff, l.match(/^\s*/)[0].length);
+      return l.slice(strip);
+    });
+  }
+
   const result = [
     ...lines.slice(0, startIdx),
     ...replacementLines,
@@ -284,7 +325,8 @@ function applyFixToCode(code, suggestion) {
 }
 
 async function applyQuickFix(suggestion) {
-  const original = extractCode();
+  let original = await extractCodeViaMainWorld();
+  if (!original) original = extractCode();
   if (!original) return { ok: false, error: "No code found in active editor." };
 
   const fixed = applyFixToCode(original, suggestion);
@@ -610,8 +652,9 @@ function attachHoverHandlers() {
 let lastCode = "";
 let timer = null;
 
-function publishSnapshot(site, force = false) {
-  const code = extractCode();
+async function publishSnapshot(site, force = false) {
+  let code = await extractCodeViaMainWorld();
+  if (!code) code = extractCode();
   if (!code) return;
   if (!force && code === lastCode) return;
   lastCode = code;
