@@ -30,6 +30,22 @@ def health() -> dict[str, str]:
     return {"status": "ok", "model": os.getenv("MODEL_ID", "qwen2.5")}
 
 
+def _replacement_is_valid_python(suggestion: AnalyzeSuggestion) -> bool:
+    """Return True if fix.replacement is syntactically valid Python."""
+    fix = suggestion.fix
+    if not fix:
+        return False
+    replacement = fix.replacement.strip() if isinstance(fix.replacement, str) else ""
+    if not replacement:
+        return False
+    import ast, textwrap
+    try:
+        ast.parse(textwrap.dedent(replacement))
+        return True
+    except SyntaxError:
+        return False
+
+
 def _fix_is_grounded(suggestion: AnalyzeSuggestion, code: str) -> bool:
     """Return True only if fix.before exists and appears verbatim in the submitted code."""
     fix = suggestion.fix
@@ -87,6 +103,7 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
         suggestions = [AnalyzeSuggestion(**item) for item in parsed_suggestions]
         suggestions = [s for s in suggestions if not _is_noop_suggestion(s)]
         suggestions = [s for s in suggestions if _fix_is_grounded(s, payload.code)]
+        suggestions = [s for s in suggestions if _replacement_is_valid_python(s)]
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         return AnalyzeResponse(
