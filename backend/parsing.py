@@ -83,10 +83,9 @@ def _normalize_one(raw: dict[str, Any]) -> dict[str, Any] | None:
     fix_replacement = str(fix_raw.get("replacement") or "")
     fix_before = str(fix_raw.get("before") or "")
 
-    # Both before and replacement must be non-empty.  A fix with no
-    # replacement is unactionable; a fix with no before anchor cannot be
-    # safely located in the file and must not be applied.
-    if not fix_replacement.strip() or not fix_before.strip():
+    # Replacement must be non-empty — a fix with no replacement is unactionable.
+    # before is optional; if absent, line-number hints are used as fallback.
+    if not fix_replacement.strip():
         return None
 
     return {

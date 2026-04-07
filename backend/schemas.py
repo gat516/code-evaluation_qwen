@@ -19,7 +19,7 @@ class SuggestionFix(BaseModel):
     hint when ``before``-anchor matching is applied.
     """
 
-    before: str
+    before: str = ""
     replacement: str
     startLine: int = Field(ge=1)
     endLine: int = Field(ge=1)
