@@ -30,43 +30,35 @@ function toLegacySeverity(input) {
   return "low";
 }
 
-function guessRangeLine(item, fallbackLine) {
-  const line = Number(item?.line ?? item?.start_line ?? item?.end_line ?? item?.anchor?.line ?? fallbackLine);
-  return Number.isInteger(line) && line >= 1 ? line : fallbackLine;
-}
-
-function guessCol(input) {
-  const col = Number(input);
-  return Number.isInteger(col) && col >= 0 ? col : 0;
+function safeInt(value, fallback, minimum = 1) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= minimum ? n : fallback;
 }
 
 function normalizeSuggestion(item, index, code) {
   const raw = item || {};
-  const line = guessRangeLine(raw, index + 1);
-  const col = guessCol(raw?.col ?? raw?.fix?.range?.startCol);
-  const endLine = guessRangeLine({ line: raw?.end_line, end_line: raw?.fix?.range?.endLine }, line);
-  const endCol = guessCol(raw?.end_col ?? raw?.fix?.range?.endCol ?? col);
+
+  // The backend parsing layer already canonicalizes to {line, end_line, fix{before, replacement, startLine, endLine}}.
+  // Here we only add UI-layer fields that the content script and sidebar reference.
+  const line = safeInt(raw?.line, index + 1);
+  const endLine = safeInt(raw?.end_line, line);
 
   const canonicalSeverity = toCanonicalSeverity(raw?.severity);
   const legacySeverity = toLegacySeverity(canonicalSeverity);
   const message = String(raw?.message || "Potential issue detected.");
 
-  const replacement = String(raw?.fix?.replacement ?? "");
+  // Pass canonical fix fields through unchanged.
+  const fixRaw = (raw?.fix && typeof raw.fix === "object") ? raw.fix : {};
   const fix = {
-    replacement,
-    range: {
-      startLine: line,
-      startCol: col,
-      endLine,
-      endCol
-    }
+    before: String(fixRaw.before ?? ""),
+    replacement: String(fixRaw.replacement ?? ""),
+    startLine: safeInt(fixRaw.startLine, line),
+    endLine: safeInt(fixRaw.endLine, endLine),
   };
 
   return {
     line,
-    col,
     end_line: endLine,
-    end_col: endCol,
     severity: canonicalSeverity,
     message,
     fix,

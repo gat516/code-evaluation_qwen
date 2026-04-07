@@ -198,36 +198,86 @@ async function setCodeInEditor(code) {
   return setCodeInMonaco(code) || setCodeInCodeMirror6(code) || setCodeInCodeMirror5(code) || setCodeInAce(code) || setCodeInTextarea(code);
 }
 
-// ── Apply fix (line-range replacement using fix.replacement) ─────────────────
+// ── Apply fix (anchor-based replacement using fix.before + fix.replacement) ───
+
+/**
+ * Attempt to locate the block described by `beforeText` in `lines` starting
+ * near `hintStartLine` (1-based). Returns the matched [startIdx, endIdx]
+ * (0-based, inclusive) or null if no match is found.
+ *
+ * Matching is fuzzy-tolerant to leading whitespace changes so that minor
+ * re-indentation by the LLM does not prevent a match. Content after stripping
+ * leading/trailing whitespace from each line must match exactly.
+ */
+function findAnchorRange(lines, beforeText, hintStartLine) {
+  const beforeLines = beforeText.split("\n");
+  const blockLen = beforeLines.length;
+
+  // Normalise a line for comparison: strip only leading/trailing whitespace.
+  const norm = (s) => s.trimStart();
+  const normedBefore = beforeLines.map(norm);
+
+  /**
+   * Check whether `lines[startIdx .. startIdx + blockLen - 1]` matches
+   * the normalised before-block.
+   */
+  function matchesAt(startIdx) {
+    if (startIdx < 0 || startIdx + blockLen > lines.length) return false;
+    for (let i = 0; i < blockLen; i++) {
+      if (norm(lines[startIdx + i]) !== normedBefore[i]) return false;
+    }
+    return true;
+  }
+
+  // Search outward from the hint line in both directions.
+  const hintIdx = Math.max(0, hintStartLine - 1);
+  const maxRadius = lines.length;
+  for (let radius = 0; radius <= maxRadius; radius++) {
+    const candidates = radius === 0
+      ? [hintIdx]
+      : [hintIdx - radius, hintIdx + radius].filter((i) => i >= 0 && i < lines.length);
+    for (const idx of candidates) {
+      if (matchesAt(idx)) return [idx, idx + blockLen - 1];
+    }
+  }
+  return null;
+}
 
 function applyFixToCode(code, suggestion) {
-  const replacement = String(suggestion?.fix?.replacement || "").trim();
+  const fix = suggestion?.fix || {};
+  const replacement = String(fix.replacement || "").trim();
   if (!replacement) return null;
 
-  const range = suggestion?.fix?.range || {};
-  let startLine = Number(suggestion?.line || range.startLine || 1);
-  let endLine = Number(suggestion?.end_line || range.endLine || startLine);
-
-  if (!Number.isInteger(startLine) || startLine < 1) return null;
+  const beforeText = String(fix.before || "").trim();
+  const hintStartLine = Number(fix.startLine || suggestion?.line || 1);
+  const hintEndLine = Number(fix.endLine || suggestion?.end_line || hintStartLine);
 
   const lines = code.split("\n");
 
+  let startIdx, endIdx;
 
-  // Expand range to cover the full contiguous block of identical lines
-  if (startLine >= 1 && startLine <= lines.length) {
-    const targetLine = lines[startLine - 1];
-    while (startLine > 1 && lines[startLine - 2] === targetLine) startLine--;
-    while (endLine < lines.length && lines[endLine] === targetLine) endLine++;
+  if (beforeText) {
+    // Primary path: locate the exact before-block via anchor matching.
+    const match = findAnchorRange(lines, beforeText, hintStartLine);
+    if (!match) {
+      // Before-anchor did not match the current code — abort rather than
+      // clobber an unrelated range.
+      return null;
+    }
+    [startIdx, endIdx] = match;
+  } else {
+    // Fallback path: no before-anchor provided; use line-number hints directly.
+    // This handles legacy suggestions that have no before field.
+    startIdx = Math.max(0, hintStartLine - 1);
+    endIdx = Math.min(lines.length - 1, hintEndLine - 1);
+    if (endIdx < startIdx) return null;
   }
-
-  const boundedEnd = Math.min(endLine, lines.length);
-  if (boundedEnd < startLine) return null;
 
   const replacementLines = replacement.split("\n");
   const result = [
-    ...lines.slice(0, startLine - 1),
+    ...lines.slice(0, startIdx),
     ...replacementLines,
-    ...lines.slice(boundedEnd)
+    ...lines.slice(endIdx + 1),
   ].join("\n");
 
   return result !== code ? result : null;

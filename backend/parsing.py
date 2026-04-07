@@ -44,11 +44,26 @@ def _safe_int(value: Any, default: int, minimum: int = 0) -> int:
     return parsed if parsed >= minimum else default
 
 
-def _normalize_one(raw: dict[str, Any]) -> dict[str, Any]:
+def _normalize_one(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize a raw LLM suggestion into the canonical contract.
+
+    Returns ``None`` when the suggestion is missing required fix data and
+    should be discarded rather than surfaced to the client.
+
+    Canonical fix shape::
+
+        {
+            "before": "<verbatim original lines being replaced>",
+            "replacement": "<corrected lines>",
+            "startLine": <int, 1-based>,
+            "endLine": <int, 1-based>,
+        }
+    """
     line = _safe_int(raw.get("line"), 1, minimum=1)
-    col = _safe_int(raw.get("col"), 0, minimum=0)
     end_line = _safe_int(raw.get("end_line"), line, minimum=1)
-    end_col = _safe_int(raw.get("end_col"), max(col + 1, 1), minimum=0)
+    # Guard: end_line must not precede line.
+    if end_line < line:
+        end_line = line
 
     severity = str(raw.get("severity") or "info").lower()
     if severity not in ("error", "warning", "info"):
@@ -57,24 +72,33 @@ def _normalize_one(raw: dict[str, Any]) -> dict[str, Any]:
     message = str(raw.get("message") or "Potential issue detected.").strip() or "Potential issue detected."
 
     fix_raw = raw.get("fix") if isinstance(raw.get("fix"), dict) else {}
+
+    # startLine/endLine are optional hint fields the LLM may include.
+    # Fall back to the top-level line/end_line when absent.
+    start_line = _safe_int(fix_raw.get("startLine"), line, minimum=1)
+    end_line_fix = _safe_int(fix_raw.get("endLine"), end_line, minimum=1)
+    if end_line_fix < start_line:
+        end_line_fix = start_line
+
     fix_replacement = str(fix_raw.get("replacement") or "")
-    fix_range_raw = fix_raw.get("range") if isinstance(fix_raw.get("range"), dict) else {}
+    fix_before = str(fix_raw.get("before") or "")
+
+    # Both before and replacement must be non-empty.  A fix with no
+    # replacement is unactionable; a fix with no before anchor cannot be
+    # safely located in the file and must not be applied.
+    if not fix_replacement.strip() or not fix_before.strip():
+        return None
 
     return {
-        "line": line,
-        "col": col,
-        "end_line": end_line,
-        "end_col": end_col,
+        "line": start_line,
+        "end_line": end_line_fix,
         "severity": severity,
         "message": message,
         "fix": {
+            "before": fix_before,
             "replacement": fix_replacement,
-            "range": {
-                "startLine": _safe_int(fix_range_raw.get("startLine"), line, minimum=1),
-                "startCol": _safe_int(fix_range_raw.get("startCol"), col, minimum=0),
-                "endLine": _safe_int(fix_range_raw.get("endLine"), end_line, minimum=1),
-                "endCol": _safe_int(fix_range_raw.get("endCol"), end_col, minimum=0),
-            },
+            "startLine": start_line,
+            "endLine": end_line_fix,
         },
         "source": "ai",
     }
@@ -93,5 +117,7 @@ def parse_llm_suggestions(raw_text: str) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for item in raw_suggestions:
         if isinstance(item, dict):
-            normalized.append(_normalize_one(item))
+            result = _normalize_one(item)
+            if result is not None:
+                normalized.append(result)
     return normalized
