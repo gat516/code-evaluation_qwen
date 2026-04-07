@@ -31,12 +31,13 @@ def health() -> dict[str, str]:
 
 
 def _fix_is_grounded(suggestion: AnalyzeSuggestion, code: str) -> bool:
-    """Return True if the fix.before text actually appears in the submitted code."""
-    before = ""
-    if suggestion.fix and isinstance(suggestion.fix, dict):
-        before = str(suggestion.fix.get("before") or "").strip()
+    """Return True only if fix.before exists and appears verbatim in the submitted code."""
+    fix = suggestion.fix
+    if not fix:
+        return False
+    before = fix.before.strip() if isinstance(fix.before, str) else ""
     if not before:
-        return True  # No before anchor — allow through, line-number fallback will handle it
+        return False  # Require a before anchor — no anchor means unverifiable hallucination
     code_stripped = "\n".join(l.strip() for l in code.splitlines())
     before_stripped = "\n".join(l.strip() for l in before.splitlines())
     return before_stripped in code_stripped
