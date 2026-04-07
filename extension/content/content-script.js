@@ -35,6 +35,7 @@ let overlayRafId = 0;
 let cardHideTimer = 0;
 let loadingIndicatorTimer = 0;
 const dismissedSuggestionKeys = new Set();
+const appliedFixKeys = new Set();
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -624,6 +625,7 @@ function attachHoverHandlers() {
       const result = await applyQuickFix(currentCardSuggestion);
       if (result?.ok) {
         const key = getSuggestionKey(currentCardSuggestion);
+        appliedFixKeys.add(key);
         dismissedSuggestionKeys.add(key);
         latestResult = {
           ...(latestResult || {}),
@@ -750,7 +752,11 @@ async function start() {
 if (hasExtensionContext()) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "ANALYSIS_RESULT") {
-      latestResult = message.payload;
+      const incoming = message.payload;
+      incoming.suggestions = (incoming.suggestions || []).filter(
+        (s) => !appliedFixKeys.has(getSuggestionKey(s))
+      );
+      latestResult = incoming;
       dismissedSuggestionKeys.clear();
       renderInlineSuggestions(latestResult);
       hideLoadingIndicator();

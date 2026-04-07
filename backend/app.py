@@ -30,6 +30,18 @@ def health() -> dict[str, str]:
     return {"status": "ok", "model": os.getenv("MODEL_ID", "qwen2.5")}
 
 
+def _fix_is_grounded(suggestion: AnalyzeSuggestion, code: str) -> bool:
+    """Return True if the fix.before text actually appears in the submitted code."""
+    before = ""
+    if suggestion.fix and isinstance(suggestion.fix, dict):
+        before = str(suggestion.fix.get("before") or "").strip()
+    if not before:
+        return True  # No before anchor — allow through, line-number fallback will handle it
+    code_stripped = "\n".join(l.strip() for l in code.splitlines())
+    before_stripped = "\n".join(l.strip() for l in before.splitlines())
+    return before_stripped in code_stripped
+
+
 def _is_noop_suggestion(suggestion: AnalyzeSuggestion) -> bool:
     msg = (suggestion.message or "").strip().lower()
     if not msg:
@@ -73,6 +85,7 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
 
         suggestions = [AnalyzeSuggestion(**item) for item in parsed_suggestions]
         suggestions = [s for s in suggestions if not _is_noop_suggestion(s)]
+        suggestions = [s for s in suggestions if _fix_is_grounded(s, payload.code)]
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         return AnalyzeResponse(
