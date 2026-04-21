@@ -15,16 +15,10 @@ conda activate gpu-env
 
 ## Start AI suggestion backend
 
-Start Qwen server:
+Starts the Qwen model server and FastAPI wrapper together:
 
 ```bash
-python start_server.py
-```
-
-Start API wrapper:
-
-```bash
-uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+./start_backend.sh
 ```
 
 Health check:
@@ -135,15 +129,42 @@ Open extension options and configure:
 - `Broad editor detection`
 - `Auto-analyze while typing`
 
-## ZeroTier / remote backend workflow
+## Remote GPU backend workflow
 
-If AI backend runs remotely but browser is local, use SSH port forwarding:
+Replace `char@10.144.50.20` with your GPU server's user and IP.
+
+**1. Start backends on the GPU server:**
+
+```bash
+ssh char@10.144.50.20 "cd ~/projects/research/code-evaluation_qwen && ./start_backend.sh"
+```
+
+Or start it in a persistent session so it survives disconnect:
+
+```bash
+ssh char@10.144.50.20 "cd ~/projects/research/code-evaluation_qwen && tmux new-session -d -s backend './start_backend.sh'"
+```
+
+Reattach to check logs later:
+
+```bash
+ssh char@10.144.50.20 "tmux attach -t backend"
+```
+
+**2. Open a tunnel to forward port 8000 locally:**
 
 ```bash
 ssh -N -L 8000:127.0.0.1:8000 char@10.144.50.20
 ```
 
-Then set extension backend URL to:
+**Or do both in one shot** (starts backends then tunnels; Ctrl+C closes the tunnel but leaves backends running in tmux):
+
+```bash
+ssh char@10.144.50.20 "cd ~/projects/research/code-evaluation_qwen && tmux new-session -d -s backend './start_backend.sh'" && \
+ssh -N -L 8000:127.0.0.1:8000 char@10.144.50.20
+```
+
+**3. Set extension backend URL to:**
 
 - `http://127.0.0.1:8000`
 
