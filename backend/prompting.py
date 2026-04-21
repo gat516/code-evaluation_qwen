@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from backend.schemas import StudentMemory
+
 
 SCHEMA_EXAMPLE = {
     "suggestions": [
@@ -21,10 +23,32 @@ SCHEMA_EXAMPLE = {
 }
 
 
-def build_analysis_messages(code: str, language: str, site: str | None, metadata: dict[str, Any]) -> list[dict[str, str]]:
+def _format_memory(memory: StudentMemory) -> str:
+    lines = [f"Student: {memory.student}", "Known error patterns:"]
+    for p in memory.error_patterns:
+        lines.append(
+            f"  - {p.pattern} (freq={p.frequency}, status={p.status}): {p.root_cause}"
+        )
+    return "\n".join(lines)
+
+
+def build_analysis_messages(
+    code: str,
+    language: str,
+    site: str | None,
+    metadata: dict[str, Any],
+    student_memory: StudentMemory | None = None,
+) -> list[dict[str, str]]:
     schema_text = json.dumps(SCHEMA_EXAMPLE, indent=2)
     site_name = site or "unknown"
     metadata_text = json.dumps(metadata or {}, ensure_ascii=True)
+
+    memory_clause = (
+        f"\nStudent error history:\n{_format_memory(student_memory)}\n"
+        "Pay extra attention to these known patterns when reviewing the code.\n"
+        if student_memory and student_memory.error_patterns
+        else ""
+    )
 
     system_prompt = (
         "You are a strict static analysis assistant for coding interview solutions. "
@@ -58,7 +82,8 @@ def build_analysis_messages(code: str, language: str, site: str | None, metadata
         "before to the full verbatim text of that repeated block.\n"
         "Return at most 5 suggestions, sorted by impact.\n"
         "If there are no issues with actionable fixes, return {'suggestions': []}.\n\n"
-        f"Metadata:\n{metadata_text}\n\n"
+        f"Metadata:\n{metadata_text}\n"
+        f"{memory_clause}\n"
         f"Example JSON format:\n{schema_text}\n\n"
         f"Code:\n```{language}\n{code}\n```"
     )

@@ -42,9 +42,46 @@ curl -X POST http://127.0.0.1:8000/analyze \
     "code": "for i in range(10):\n    print(i)",
     "language": "python",
     "site": "onecompiler",
+    "student_id": "zhang_chengming",
     "metadata": {"source": "manual"}
   }'
 ```
+
+## Student memory
+
+The backend tracks per-student error patterns as Markdown files under `memory/`. Each file has YAML frontmatter and a fenced JSON block:
+
+```
+memory/zhang_chengming.md
+```
+
+```markdown
+---
+student: Zhang, Chengming
+updated: 2026-04-21
+---
+
+\`\`\`json
+[
+  {
+    "pattern": "Off-by-one in loops",
+    "first_seen": "2026-04-02",
+    "last_seen": "2026-04-05",
+    "frequency": 3,
+    "examples": ["Used `i <= len(arr)` instead of `i < len(arr)`"],
+    "root_cause": "Boundary condition misunderstanding",
+    "status": "improving",
+    "recommended_review": ["array indexing", "loop bounds", "dry-run practice"]
+  }
+]
+\`\`\`
+```
+
+Pass `student_id` in the `/analyze` request body to load that student's memory. Known error patterns are injected into the model prompt so recurring mistakes receive extra attention.
+
+`status` must be one of `active`, `improving`, or `resolved`.
+
+Use `backend.memory.upsert_pattern()` to create or update a pattern entry programmatically.
 
 ## Backend API
 
@@ -94,6 +131,7 @@ Open extension options and configure:
 	- `AI backend (Qwen suggestions)`
 - `Backend URL` (for AI mode), default `http://127.0.0.1:8000`
 - `API Key` (optional)
+- `Student ID` (optional) — when set, sent as `student_id` on every `/analyze` request so the backend loads that student's error pattern memory
 - `Broad editor detection`
 - `Auto-analyze while typing`
 

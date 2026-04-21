@@ -2,6 +2,7 @@ const defaults = {
   analysisMode: "ai",
   backendUrl: "http://127.0.0.1:8000",
   apiKey: "",
+  studentId: "",
   broadDetection: false,
   autoAnalyze: true,
   idleTimeout: 3000
@@ -12,6 +13,7 @@ async function loadSettings() {
   document.getElementById("analysisMode").value = settings.analysisMode || defaults.analysisMode;
   document.getElementById("backendUrl").value = settings.backendUrl || defaults.backendUrl;
   document.getElementById("apiKey").value = settings.apiKey || "";
+  document.getElementById("studentId").value = settings.studentId || "";
   document.getElementById("broadDetection").checked = !!settings.broadDetection;
   document.getElementById("autoAnalyze").checked = !!settings.autoAnalyze;
   document.getElementById("idleTimeout").value = String(settings.idleTimeout || defaults.idleTimeout);
@@ -25,6 +27,7 @@ async function saveSettings() {
     analysisMode: document.getElementById("analysisMode").value === "ai" ? "ai" : "local",
     backendUrl: document.getElementById("backendUrl").value.trim() || defaults.backendUrl,
     apiKey: document.getElementById("apiKey").value.trim(),
+    studentId: document.getElementById("studentId").value.trim(),
     broadDetection: document.getElementById("broadDetection").checked,
     autoAnalyze: document.getElementById("autoAnalyze").checked,
     idleTimeout

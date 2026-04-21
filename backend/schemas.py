@@ -1,12 +1,30 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+
+class ErrorPattern(BaseModel):
+    pattern: str
+    first_seen: str
+    last_seen: str
+    frequency: int = Field(ge=1)
+    examples: list[str] = Field(default_factory=list)
+    root_cause: str
+    status: Literal["active", "improving", "resolved"]
+    recommended_review: list[str] = Field(default_factory=list)
+
+
+class StudentMemory(BaseModel):
+    student: str
+    updated: str
+    error_patterns: list[ErrorPattern] = Field(default_factory=list)
 
 
 class AnalyzeRequest(BaseModel):
     code: str = Field(min_length=1)
     language: str = Field(default="python")
     site: str | None = None
+    student_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -8,6 +8,7 @@ async function getSettings() {
     analysisMode: "ai",
     backendUrl: "http://127.0.0.1:8000",
     apiKey: "",
+    studentId: "",
     broadDetection: false,
     autoAnalyze: true,
     idleTimeout: 3000
@@ -135,6 +136,7 @@ async function analyzeCodeWithBackend(snapshot, settings) {
       code: snapshot.code,
       language: snapshot.language || "python",
       site: snapshot.site,
+      ...(settings.studentId ? { student_id: settings.studentId } : {}),
       metadata: {
         url: snapshot.url,
         source: "extension"

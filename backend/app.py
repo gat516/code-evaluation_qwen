@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.llm_client import LLMClientError, query_chat_completions
+from backend.memory import load as load_memory
 from backend.parsing import parse_llm_suggestions
 from backend.prompting import build_analysis_messages
 from backend.schemas import (
@@ -91,11 +92,13 @@ def analyze(payload: AnalyzeRequest, _: None = Depends(verify_api_key)) -> Analy
     }
 
     try:
+        student_memory = load_memory(payload.student_id) if payload.student_id else None
         messages = build_analysis_messages(
             code=payload.code,
             language=payload.language,
             site=payload.site,
             metadata=payload.metadata,
+            student_memory=student_memory,
         )
         model_name, content = query_chat_completions(messages)
         parsed_suggestions = parse_llm_suggestions(content)
